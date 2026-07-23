@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Music Player</title>
+  <title>Music</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -20,7 +20,7 @@
       -ms-user-select: none;
       -webkit-touch-callout: none;
     }
-    
+
     input, textarea {
       user-select: text;
       -webkit-user-select: text;
@@ -36,22 +36,24 @@
       -webkit-font-smoothing: antialiased; 
       overflow: hidden; 
     }
-    
+
     #root { height: 100%; width: 100%; }
+
     .flat-card { background: #121212; border: 1px solid #222; border-radius: 20px; }
-    
+
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
-    
+    ::-webkit-scrollbar-thumb { background: #222; border-radius: 4px; }
+
     input[type="range"] {
       -webkit-appearance: none;
       appearance: none;
       height: 4px;
       border-radius: 2px;
-      background: #333;
+      background: #222;
       outline: none;
     }
+
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
       appearance: none;
@@ -67,9 +69,8 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    // --- IndexedDB Database Operations ---
     const DB_NAME = "cold_engine_db";
-    const DB_VERSION = 2;
+    const DB_VERSION = 1;
 
     const initDB = () => {
       return new Promise((resolve, reject) => {
@@ -127,141 +128,110 @@
     };
 
     function MusicPlayer() {
-      // Audio & State
-      const audioRef = React.useRef(new Audio());
-      const audioCtxRef = React.useRef(null);
-      const filtersRef = React.useRef([]);
-
       const [tracks, setTracks] = React.useState([]);
       const [playlists, setPlaylists] = React.useState([]);
-      const [activePlaylistId, setActivePlaylistId] = React.useState(null);
+      const [activeTab, setActiveTab] = React.useState("library");
+      const [selectedPlaylistId, setSelectedPlaylistId] = React.useState(null);
 
-      const [currentTrackIndex, setCurrentTrackIndex] = React.useState(null);
+      const [currentTrackId, setCurrentTrackId] = React.useState(null);
       const [isPlaying, setIsPlaying] = React.useState(false);
       const [currentTime, setCurrentTime] = React.useState(0);
       const [duration, setDuration] = React.useState(0);
       const [volume, setVolume] = React.useState(1);
-
-      const [view, setView] = React.useState('library'); // 'library', 'playlists', 'playlist-detail', 'player', 'eq', 'settings'
-      const [searchTerm, setSearchTerm] = React.useState('');
       const [isShuffle, setIsShuffle] = React.useState(false);
-      const [repeatMode, setRepeatMode] = React.useState('off'); // 'off', 'all', 'one'
-      const [showLyrics, setShowLyrics] = React.useState(false);
+      const [repeatMode, setRepeatMode] = React.useState("none");
 
-      // Drag & Drop State
-      const [draggedIndex, setDraggedIndex] = React.useState(null);
-      const [dragOverInfo, setDragOverInfo] = React.useState(null); // { index: number, position: 'above' | 'below' }
-
-      // Equalizer Bands
-      const [eqBands, setEqBands] = React.useState([
-        { label: "60Hz", val: 0 },
-        { label: "230Hz", val: 0 },
-        { label: "910Hz", val: 0 },
-        { label: "4kHz", val: 0 },
-        { label: "14kHz", val: 0 }
-      ]);
-
-      // Modals
-      const [showAddToPlaylistModal, setShowAddToPlaylistModal] = React.useState(false);
-      const [trackToAddToPlaylist, setTrackToAddToPlaylist] = React.useState(null);
-      const [showCreatePlaylistModal, setShowCreatePlaylistModal] = React.useState(false);
-      const [newPlaylistName, setNewPlaylistName] = React.useState('');
+      const [searchTerm, setSearchTerm] = React.useState("");
+      const [showPlayerModal, setShowPlayerModal] = React.useState(false);
       const [confirmClear, setConfirmClear] = React.useState(false);
 
-      // Initialize Data
+      const [playlistModalOpen, setPlaylistModalOpen] = React.useState(false);
+      const [newPlaylistName, setNewPlaylistName] = React.useState("");
+      const [addToPlaylistTrack, setAddToPlaylistTrack] = React.useState(null);
+
+      // Drag & Drop States
+      const [draggedIndex, setDraggedIndex] = React.useState(null);
+      const [dragOverInfo, setDragOverInfo] = React.useState(null);
+
+      // EQ
+      const [eqGains, setEqGains] = React.useState([0, 0, 0, 0, 0]);
+
+      const audioRef = React.useRef(new Audio());
+      const audioCtxRef = React.useRef(null);
+      const filtersRef = React.useRef([]);
+
       React.useEffect(() => {
         (async () => {
-          try {
-            const savedTracks = await getTracksFromDB();
-            if (savedTracks && savedTracks.length > 0) setTracks(savedTracks);
-            
-            const savedPlaylists = await getPlaylistsFromDB();
-            if (savedPlaylists && savedPlaylists.length > 0) setPlaylists(savedPlaylists);
-          } catch (e) {
-            console.error("Fehler beim Laden der Datenbank:", e);
-          }
+          const loadedTracks = await getTracksFromDB();
+          if (loadedTracks.length) setTracks(loadedTracks);
+          const loadedPlaylists = await getPlaylistsFromDB();
+          if (loadedPlaylists.length) setPlaylists(loadedPlaylists);
         })();
       }, []);
 
-      // Audio Context Initialization
       const initAudioContext = () => {
         if (!audioCtxRef.current) {
-          const AudioContext = window.AudioContext || window.webkitAudioContext;
-          const ctx = new AudioContext();
-          audioCtxRef.current = ctx;
-
-          const source = ctx.createMediaElementSource(audioRef.current);
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          audioCtxRef.current = new AudioCtx();
+          const source = audioCtxRef.current.createMediaElementSource(audioRef.current);
           const freqs = [60, 230, 910, 4000, 14000];
-          const filters = freqs.map((freq) => {
-            const filter = ctx.createBiquadFilter();
-            filter.type = freq <= 230 ? "lowshelf" : freq >= 4000 ? "highshelf" : "peaking";
+          filtersRef.current = freqs.map((freq, i) => {
+            const filter = audioCtxRef.current.createBiquadFilter();
+            filter.type = i === 0 ? "lowshelf" : i === 4 ? "highshelf" : "peaking";
             filter.frequency.value = freq;
-            filter.gain.value = 0;
+            filter.gain.value = eqGains[i];
             return filter;
           });
-
-          source.connect(filters[0]);
-          for (let i = 0; i < filters.length - 1; i++) {
-            filters[i].connect(filters[i + 1]);
+          source.connect(filtersRef.current[0]);
+          for (let i = 0; i < filtersRef.current.length - 1; i++) {
+            filtersRef.current[i].connect(filtersRef.current[i + 1]);
           }
-          filters[filters.length - 1].connect(ctx.destination);
-          filtersRef.current = filters;
+          filtersRef.current[filtersRef.current.length - 1].connect(audioCtxRef.current.destination);
         }
         if (audioCtxRef.current.state === "suspended") {
           audioCtxRef.current.resume();
         }
       };
 
-      // Audio Event Listeners
       React.useEffect(() => {
         const audio = audioRef.current;
-        const handleTimeUpdate = () => setCurrentTime(audio.currentTime);
-        const handleLoadedMetadata = () => setDuration(audio.duration);
-        const handleEnded = () => handleNextTrack();
+        const updateTime = () => setCurrentTime(audio.currentTime);
+        const updateDuration = () => setDuration(audio.duration || 0);
+        const handleEnded = () => playNextTrack();
 
-        audio.addEventListener('timeupdate', handleTimeUpdate);
-        audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-        audio.addEventListener('ended', handleEnded);
+        audio.addEventListener("timeupdate", updateTime);
+        audio.addEventListener("loadedmetadata", updateDuration);
+        audio.addEventListener("ended", handleEnded);
 
         return () => {
-          audio.removeEventListener('timeupdate', handleTimeUpdate);
-          audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-          audio.removeEventListener('ended', handleEnded);
+          audio.removeEventListener("timeupdate", updateTime);
+          audio.removeEventListener("loadedmetadata", updateDuration);
+          audio.removeEventListener("ended", handleEnded);
         };
-      }, [currentTrackIndex, tracks, activePlaylistId, repeatMode, isShuffle]);
+      }, [currentTrackId, tracks, playlists, selectedPlaylistId, isShuffle, repeatMode]);
 
       const getCurrentQueue = () => {
-        if (view === 'playlist-detail' || activePlaylistId) {
-          const pl = playlists.find(p => p.id === activePlaylistId);
-          if (pl) {
-            return pl.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean);
-          }
+        if (selectedPlaylistId && activeTab === "playlists") {
+          const pl = playlists.find(p => p.id === selectedPlaylistId);
+          if (!pl) return [];
+          return pl.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean);
         }
         return tracks;
       };
 
-      const playTrack = (index, playlistId = null) => {
+      const playTrack = (track) => {
+        if (!track) return;
         initAudioContext();
-        setActivePlaylistId(playlistId);
-        setCurrentTrackIndex(index);
-
-        let queue = tracks;
-        if (playlistId) {
-          const pl = playlists.find(p => p.id === playlistId);
-          if (pl) queue = pl.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean);
-        }
-
-        const track = queue[index];
-        if (track && track.fileData) {
-          audioRef.current.src = track.fileData;
-          audioRef.current.play().then(() => setIsPlaying(true)).catch(console.error);
-        }
+        setCurrentTrackId(track.id);
+        audioRef.current.src = track.fileData;
+        audioRef.current.play().then(() => setIsPlaying(true)).catch(console.error);
       };
 
       const togglePlay = () => {
         initAudioContext();
-        if (currentTrackIndex === null && tracks.length > 0) {
-          playTrack(0);
+        if (!currentTrackId) {
+          const queue = getCurrentQueue();
+          if (queue.length) playTrack(queue[0]);
           return;
         }
         if (isPlaying) {
@@ -272,56 +242,49 @@
         }
       };
 
-      const handleNextTrack = () => {
+      const playNextTrack = () => {
         const queue = getCurrentQueue();
-        if (queue.length === 0) return;
-
-        if (repeatMode === 'one') {
+        if (!queue.length) return;
+        if (repeatMode === "one") {
           audioRef.current.currentTime = 0;
           audioRef.current.play();
           return;
         }
-
-        let nextIdx;
+        let nextIndex = 0;
+        const currIndex = queue.findIndex(t => t.id === currentTrackId);
         if (isShuffle) {
-          nextIdx = Math.floor(Math.random() * queue.length);
+          nextIndex = Math.floor(Math.random() * queue.length);
         } else {
-          nextIdx = (currentTrackIndex + 1) % queue.length;
+          nextIndex = currIndex + 1;
+          if (nextIndex >= queue.length) {
+            if (repeatMode === "all") nextIndex = 0;
+            else return;
+          }
         }
-        playTrack(nextIdx, activePlaylistId);
+        playTrack(queue[nextIndex]);
       };
 
-      const handlePrevTrack = () => {
+      const playPrevTrack = () => {
         const queue = getCurrentQueue();
-        if (queue.length === 0) return;
-
-        let prevIdx = currentTrackIndex - 1;
-        if (prevIdx < 0) prevIdx = queue.length - 1;
-        playTrack(prevIdx, activePlaylistId);
+        if (!queue.length) return;
+        const currIndex = queue.findIndex(t => t.id === currentTrackId);
+        let prevIndex = currIndex - 1;
+        if (prevIndex < 0) prevIndex = queue.length - 1;
+        playTrack(queue[prevIndex]);
       };
 
       const handleSeek = (e) => {
-        const time = parseFloat(e.target.value);
-        audioRef.current.currentTime = time;
-        setCurrentTime(time);
+        const val = parseFloat(e.target.value);
+        audioRef.current.currentTime = val;
+        setCurrentTime(val);
       };
 
-      const handleVolumeChange = (e) => {
-        const vol = parseFloat(e.target.value);
-        setVolume(vol);
-        audioRef.current.volume = vol;
+      const handleVolume = (e) => {
+        const val = parseFloat(e.target.value);
+        setVolume(val);
+        audioRef.current.volume = val;
       };
 
-      const handleEQChange = (index, val) => {
-        const updated = [...eqBands];
-        updated[index].val = val;
-        setEqBands(updated);
-        if (filtersRef.current[index]) {
-          filtersRef.current[index].gain.value = val;
-        }
-      };
-
-      // File Import (Audio / Metadata)
       const handleFileUpload = (e) => {
         const files = Array.from(e.target.files);
         if (!files.length) return;
@@ -333,13 +296,10 @@
               id: Date.now() + "_" + Math.random().toString(36).substring(2, 7),
               title: file.name.replace(/\.[^/.]+$/, ""),
               artist: "Unbekannter Künstler",
-              album: "Unbekanntes Album",
               duration: 0,
               fileData: event.target.result,
-              cover: null,
               isFavorite: false
             };
-
             setTracks(prev => {
               const updated = [...prev, track];
               saveTracksToDB(updated);
@@ -356,7 +316,6 @@
           saveTracksToDB(updated);
           return updated;
         });
-        // Remove from playlists as well
         setPlaylists(prev => {
           const updated = prev.map(pl => ({
             ...pl,
@@ -375,22 +334,89 @@
         });
       };
 
-      // Playlist Management
+      // --- Drag & Drop Reordering (Fix für exakte Position & Roter Strich) ---
+      const handleDragStart = (e, index) => {
+        setDraggedIndex(index);
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', index.toString());
+      };
+
+      const handleDragOver = (e, index) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+
+        const rect = e.currentTarget.getBoundingClientRect();
+        const midY = rect.top + rect.height / 2;
+        const position = e.clientY < midY ? 'above' : 'below';
+
+        setDragOverInfo({ index, position });
+      };
+
+      const handleDragEnd = () => {
+        setDraggedIndex(null);
+        setDragOverInfo(null);
+      };
+
+      const handleDrop = (e, dropIndex, listType) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (draggedIndex === null || !dragOverInfo) return;
+
+        const position = dragOverInfo.position;
+        let targetPos = position === 'above' ? dropIndex : dropIndex + 1;
+
+        if (listType === 'library') {
+          setTracks(prev => {
+            const updated = [...prev];
+            const [movedItem] = updated.splice(draggedIndex, 1);
+            let insertAt = targetPos;
+            if (draggedIndex < targetPos) {
+              insertAt = targetPos - 1;
+            }
+            updated.splice(insertAt, 0, movedItem);
+            saveTracksToDB(updated);
+            return updated;
+          });
+        } else if (listType === 'playlist') {
+          setPlaylists(prev => {
+            const updated = prev.map(pl => {
+              if (pl.id === selectedPlaylistId) {
+                const tIds = [...pl.trackIds];
+                const [movedId] = tIds.splice(draggedIndex, 1);
+                let insertAt = targetPos;
+                if (draggedIndex < targetPos) {
+                  insertAt = targetPos - 1;
+                }
+                tIds.splice(insertAt, 0, movedId);
+                return { ...pl, trackIds: tIds };
+              }
+              return pl;
+            });
+            savePlaylistsToDB(updated);
+            return updated;
+          });
+        }
+
+        setDraggedIndex(null);
+        setDragOverInfo(null);
+      };
+
+      // Playlists
       const createPlaylist = () => {
         if (!newPlaylistName.trim()) return;
         const newPl = {
           id: "pl_" + Date.now(),
           name: newPlaylistName.trim(),
-          trackIds: [],
-          cover: null
+          trackIds: []
         };
         setPlaylists(prev => {
           const updated = [...prev, newPl];
           savePlaylistsToDB(updated);
           return updated;
         });
-        setNewPlaylistName('');
-        setShowCreatePlaylistModal(false);
+        setNewPlaylistName("");
+        setPlaylistModalOpen(false);
       };
 
       const addTrackToPlaylist = (playlistId, trackId) => {
@@ -404,10 +430,10 @@
           savePlaylistsToDB(updated);
           return updated;
         });
-        setShowAddToPlaylistModal(false);
+        setAddToPlaylistTrack(null);
       };
 
-      const removeTrackFromPlaylist = (playlistId, trackId) => {
+      const removeFromPlaylist = (playlistId, trackId) => {
         setPlaylists(prev => {
           const updated = prev.map(pl => {
             if (pl.id === playlistId) {
@@ -422,17 +448,14 @@
 
       const deletePlaylist = (playlistId) => {
         setPlaylists(prev => {
-          const updated = prev.filter(pl => pl.id !== playlistId);
+          const updated = prev.filter(p => p.id !== playlistId);
           savePlaylistsToDB(updated);
           return updated;
         });
-        if (activePlaylistId === playlistId) {
-          setActivePlaylistId(null);
-          setView('playlists');
-        }
+        if (selectedPlaylistId === playlistId) setSelectedPlaylistId(null);
       };
 
-      // Backup & Restore
+      // Backup / Clear
       const exportBackup = () => {
         const data = JSON.stringify({ tracks, playlists });
         const blob = new Blob([data], { type: "application/json" });
@@ -458,9 +481,9 @@
               setPlaylists(data.playlists);
               savePlaylistsToDB(data.playlists);
             }
-            alert("Backup erfolgreich wiederhergestellt!");
+            alert("Backup erfolgreich geladen!");
           } catch (err) {
-            alert("Fehler beim Importieren des Backups.");
+            alert("Fehler beim Importieren!");
           }
         };
         reader.readAsText(file);
@@ -476,132 +499,69 @@
         setConfirmClear(false);
       };
 
-      // --- Precise Drag & Drop Implementation ---
-      const handleDragStart = (e, index) => {
-        setDraggedIndex(index);
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', index.toString());
-      };
-
-      const handleDragOver = (e, index) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-
-        const rect = e.currentTarget.getBoundingClientRect();
-        const midY = rect.top + rect.height / 2;
-        const position = e.clientY < midY ? 'above' : 'below';
-
-        setDragOverInfo({ index, position });
-      };
-
-      const handleDrop = (e, dropIndex, listType) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (draggedIndex === null || dragOverInfo === null) return;
-
-        const position = dragOverInfo.position;
-        let targetPos = position === 'above' ? dropIndex : dropIndex + 1;
-
-        if (listType === 'library') {
-          const updated = [...tracks];
-          const [movedItem] = updated.splice(draggedIndex, 1);
-          let insertAt = targetPos;
-          if (draggedIndex < targetPos) {
-            insertAt = targetPos - 1;
-          }
-          updated.splice(insertAt, 0, movedItem);
-          setTracks(updated);
-          saveTracksToDB(updated);
-        } else if (listType === 'playlist') {
-          const pl = playlists.find(p => p.id === activePlaylistId);
-          if (pl) {
-            const updatedTrackIds = [...pl.trackIds];
-            const [movedId] = updatedTrackIds.splice(draggedIndex, 1);
-            let insertAt = targetPos;
-            if (draggedIndex < targetPos) {
-              insertAt = targetPos - 1;
-            }
-            updatedTrackIds.splice(insertAt, 0, movedId);
-            const updatedPlaylists = playlists.map(p => 
-              p.id === activePlaylistId ? { ...p, trackIds: updatedTrackIds } : p
-            );
-            setPlaylists(updatedPlaylists);
-            savePlaylistsToDB(updatedPlaylists);
-          }
-        }
-
-        setDraggedIndex(null);
-        setDragOverInfo(null);
-      };
-
-      const handleDragEnd = () => {
-        setDraggedIndex(null);
-        setDragOverInfo(null);
-      };
-
-      // Helpers
       const formatTime = (secs) => {
-        if (isNaN(secs) || secs === 0) return "0:00";
+        if (!secs || isNaN(secs)) return "0:00";
         const m = Math.floor(secs / 60);
         const s = Math.floor(secs % 60);
         return `${m}:${s < 10 ? '0' : ''}${s}`;
       };
 
-      const currentQueue = getCurrentQueue();
-      const currentTrack = currentQueue[currentTrackIndex] || null;
-
+      const currentTrack = tracks.find(t => t.id === currentTrackId);
       const filteredTracks = tracks.filter(t => 
         t.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
         t.artist.toLowerCase().includes(searchTerm.toLowerCase())
       );
 
-      const activePlaylist = playlists.find(p => p.id === activePlaylistId);
-      const activePlaylistTracks = activePlaylist 
+      const activePlaylist = playlists.find(p => p.id === selectedPlaylistId);
+      const playlistTracks = activePlaylist 
         ? activePlaylist.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean)
         : [];
 
       return (
         <div style={{ display: "flex", flexDirection: "column", height: "100dvh", width: "100%", background: "#000" }}>
           
-          {/* Top Bar Navigation */}
+          {/* Top Bar */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px", borderBottom: "1px solid #1a1a1a" }}>
             <div style={{ fontWeight: 800, fontSize: 18, color: "#fff", letterSpacing: "-0.02em" }}>
               Music
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              {['library', 'playlists', 'player', 'eq', 'settings'].map(tab => (
+              {[
+                { id: "library", label: "Bibliothek" },
+                { id: "playlists", label: "Playlists" },
+                { id: "eq", label: "Equalizer" },
+                { id: "backup", label: "Backup / Reset" }
+              ].map(tab => (
                 <button
-                  key={tab}
-                  onClick={() => setView(tab)}
+                  key={tab.id}
+                  onClick={() => { setActiveTab(tab.id); if (tab.id !== "playlists") setSelectedPlaylistId(null); }}
                   style={{
-                    background: view === tab ? "#fc3c44" : "#121212",
-                    color: view === tab ? "#fff" : "#888",
+                    background: activeTab === tab.id ? "#fc3c44" : "#121212",
+                    color: activeTab === tab.id ? "#fff" : "#888",
                     border: "none",
                     borderRadius: 12,
                     padding: "8px 14px",
                     fontSize: 12,
                     fontWeight: 600,
-                    cursor: "pointer",
-                    textTransform: "capitalize"
+                    cursor: "pointer"
                   }}
                 >
-                  {tab === 'library' ? 'Bibliothek' : tab === 'playlists' ? 'Playlists' : tab === 'player' ? 'Player' : tab === 'eq' ? 'EQ' : 'Optionen'}
+                  {tab.label}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Main Content Area */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "16px", paddingBottom: "100px" }}>
+          {/* Main Content */}
+          <div style={{ flex: 1, overflowY: "auto", padding: "16px", paddingBottom: "110px" }}>
             
-            {/* --- VIEW: LIBRARY --- */}
-            {view === 'library' && (
+            {/* TAB: BIBLIOTHEK */}
+            {activeTab === "library" && (
               <div>
                 <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
                   <input
                     type="text"
-                    placeholder="Titel oder Künstler suchen..."
+                    placeholder="Suchen..."
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     style={{
@@ -626,18 +586,18 @@
                     display: "flex",
                     alignItems: "center"
                   }}>
-                    + Importieren
+                    + Musik laden
                     <input type="file" multiple accept="audio/*" onChange={handleFileUpload} style={{ display: "none" }} />
                   </label>
                 </div>
 
                 {filteredTracks.length === 0 ? (
                   <div style={{ textAlign: "center", color: "#555", padding: "60px 0", fontSize: 13 }}>
-                    {searchTerm ? "Keine Titel gefunden" : "Keine Musik vorhanden. Klicke auf '+ Importieren' um Titel hinzuzufügen."}
+                    Keine Titel vorhanden.
                   </div>
                 ) : (
                   filteredTracks.map((track, idx) => {
-                    const isCurrent = currentTrackIndex === idx && !activePlaylistId;
+                    const isPlayingCurrent = currentTrackId === track.id;
                     const isDragged = draggedIndex === idx;
                     const isDragOver = dragOverInfo && dragOverInfo.index === idx && draggedIndex !== idx;
                     const showTopIndicator = isDragOver && dragOverInfo.position === 'above';
@@ -645,7 +605,7 @@
 
                     return (
                       <div
-                        key={track.id || idx}
+                        key={track.id}
                         draggable
                         onDragStart={(e) => handleDragStart(e, idx)}
                         onDragOver={(e) => handleDragOver(e, idx)}
@@ -659,12 +619,11 @@
                           marginBottom: 8,
                           position: "relative",
                           opacity: isDragged ? 0.35 : 1,
-                          cursor: "grab",
-                          background: isCurrent ? "rgba(252, 60, 68, 0.08)" : "#121212",
-                          borderColor: isCurrent ? "#fc3c44" : "#222"
+                          background: isPlayingCurrent ? "rgba(252, 60, 68, 0.08)" : "#121212",
+                          borderColor: isPlayingCurrent ? "#fc3c44" : "#222"
                         }}
                       >
-                        {/* Red Indicator Lines for Drop Position */}
+                        {/* Red Drop Indicator Line */}
                         {showTopIndicator && (
                           <div style={{
                             position: "absolute",
@@ -694,64 +653,54 @@
                           }} />
                         )}
 
-                        <div style={{ color: "#444", marginRight: 10, fontSize: 14, cursor: "grab" }}>
+                        {/* Drag Handle Icon */}
+                        <div style={{ color: "#444", marginRight: 10, fontSize: 14, cursor: "grab" }} title="Ziehen zum Sortieren">
                           ⠿
                         </div>
 
                         <div 
-                          onClick={() => playTrack(idx)}
+                          onClick={() => playTrack(track)}
                           style={{
-                            width: 42,
-                            height: 42,
+                            width: 40,
+                            height: 40,
                             borderRadius: 8,
                             background: "#222",
-                            overflow: "hidden",
-                            marginRight: 12,
-                            flexShrink: 0,
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
-                            cursor: "pointer"
+                            marginRight: 12,
+                            cursor: "pointer",
+                            fontSize: 16
                           }}
                         >
-                          {track.cover ? (
-                            <img src={track.cover} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                          ) : (
-                            <span style={{ fontSize: 18, color: "#555" }}>🎵</span>
-                          )}
+                          🎵
                         </div>
 
-                        <div onClick={() => playTrack(idx)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
-                          <div style={{ fontWeight: 600, fontSize: 13, color: isCurrent ? "#fc3c44" : "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {track.title || track.name}
+                        <div onClick={() => playTrack(track)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                          <div style={{ fontWeight: 600, fontSize: 13, color: isPlayingCurrent ? "#fc3c44" : "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {track.title}
                           </div>
                           <div style={{ fontSize: 11, color: "#666", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 2 }}>
-                            {track.artist || "Unbekannter Künstler"}
+                            {track.artist}
                           </div>
                         </div>
 
-                        <div style={{ fontSize: 11, color: "#555", marginLeft: 8, marginRight: 8 }}>
-                          {formatTime(track.duration || 0)}
-                        </div>
-
-                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: 8 }}>
                           <button
-                            onClick={(e) => { e.stopPropagation(); setTrackToAddToPlaylist(track); setShowAddToPlaylistModal(true); }}
+                            onClick={() => setAddToPlaylistTrack(track)}
                             title="Zu Playlist hinzufügen"
-                            style={{ background: "none", border: "none", color: "#888", fontSize: 15, cursor: "pointer", padding: 4 }}
+                            style={{ background: "none", border: "none", color: "#888", fontSize: 14, cursor: "pointer", padding: 4 }}
                           >
                             ➕
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); toggleFavorite(track.id); }}
-                            title="Favorit"
-                            style={{ background: "none", border: "none", color: track.isFavorite ? "#fc3c44" : "#444", fontSize: 15, cursor: "pointer", padding: 4 }}
+                            onClick={() => toggleFavorite(track.id)}
+                            style={{ background: "none", border: "none", color: track.isFavorite ? "#fc3c44" : "#444", fontSize: 14, cursor: "pointer", padding: 4 }}
                           >
                             ♥
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); deleteTrack(track.id); }}
-                            title="Löschen"
+                            onClick={() => deleteTrack(track.id)}
                             style={{ background: "none", border: "none", color: "#444", fontSize: 13, cursor: "pointer", padding: 4 }}
                           >
                             ✕
@@ -764,324 +713,195 @@
               </div>
             )}
 
-            {/* --- VIEW: PLAYLISTS LIST --- */}
-            {view === 'playlists' && (
+            {/* TAB: PLAYLISTS */}
+            {activeTab === "playlists" && (
               <div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "#888" }}>Meine Playlists ({playlists.length})</div>
-                  <button
-                    onClick={() => setShowCreatePlaylistModal(true)}
-                    style={{ background: "#fc3c44", color: "#fff", border: "none", borderRadius: 12, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-                  >
-                    + Neue Playlist
-                  </button>
-                </div>
-
-                {playlists.length === 0 ? (
-                  <div style={{ textAlign: "center", color: "#555", padding: "60px 0", fontSize: 13 }}>
-                    Noch keine Playlists vorhanden. Erstelle eine neue Playlist!
-                  </div>
-                ) : (
-                  playlists.map(pl => (
-                    <div
-                      key={pl.id}
-                      onClick={() => { setActivePlaylistId(pl.id); setView('playlist-detail'); }}
-                      className="flat-card"
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        padding: "14px",
-                        marginBottom: 10,
-                        cursor: "pointer"
-                      }}
-                    >
-                      <div style={{
-                        width: 48,
-                        height: 48,
-                        borderRadius: 10,
-                        background: "#222",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: 20,
-                        marginRight: 14
-                      }}>
-                        📂
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 700, fontSize: 14, color: "#fff" }}>{pl.name}</div>
-                        <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>{pl.trackIds.length} Titel</div>
-                      </div>
+                {!selectedPlaylistId ? (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#888" }}>Playlists ({playlists.length})</div>
                       <button
-                        onClick={(e) => { e.stopPropagation(); deletePlaylist(pl.id); }}
-                        style={{ background: "none", border: "none", color: "#444", fontSize: 13, cursor: "pointer", padding: 6 }}
+                        onClick={() => setPlaylistModalOpen(true)}
+                        style={{ background: "#fc3c44", color: "#fff", border: "none", borderRadius: 12, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
                       >
-                        ✕
+                        + Neue Playlist
                       </button>
                     </div>
-                  ))
-                )}
-              </div>
-            )}
 
-            {/* --- VIEW: PLAYLIST DETAIL --- */}
-            {view === 'playlist-detail' && activePlaylist && (
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
-                  <button
-                    onClick={() => setView('playlists')}
-                    style={{ background: "#121212", border: "1px solid #222", color: "#fff", borderRadius: 10, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
-                  >
-                    ← Zurück
-                  </button>
-                  <div style={{ fontWeight: 800, fontSize: 18, color: "#fff" }}>{activePlaylist.name}</div>
-                </div>
-
-                {activePlaylistTracks.length === 0 ? (
-                  <div style={{ textAlign: "center", color: "#555", padding: "60px 0", fontSize: 13 }}>
-                    Diese Playlist ist noch leer. Füge Titel aus deiner Bibliothek hinzu!
+                    {playlists.length === 0 ? (
+                      <div style={{ textAlign: "center", color: "#555", padding: "60px 0", fontSize: 13 }}>
+                        Keine Playlists vorhanden.
+                      </div>
+                    ) : (
+                      playlists.map(pl => (
+                        <div
+                          key={pl.id}
+                          onClick={() => setSelectedPlaylistId(pl.id)}
+                          className="flat-card"
+                          style={{ display: "flex", alignItems: "center", padding: "14px", marginBottom: 10, cursor: "pointer" }}
+                        >
+                          <div style={{ width: 44, height: 44, borderRadius: 10, background: "#222", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, marginRight: 14 }}>
+                            📂
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 700, fontSize: 14, color: "#fff" }}>{pl.name}</div>
+                            <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>{pl.trackIds.length} Titel</div>
+                          </div>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); deletePlaylist(pl.id); }}
+                            style={{ background: "none", border: "none", color: "#444", fontSize: 13, cursor: "pointer", padding: 6 }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))
+                    )}
                   </div>
                 ) : (
-                  activePlaylistTracks.map((track, idx) => {
-                    const isCurrent = currentTrackIndex === idx && activePlaylistId === activePlaylist.id;
-                    const isDragged = draggedIndex === idx;
-                    const isDragOver = dragOverInfo && dragOverInfo.index === idx && draggedIndex !== idx;
-                    const showTopIndicator = isDragOver && dragOverInfo.position === 'above';
-                    const showBottomIndicator = isDragOver && dragOverInfo.position === 'below';
-
-                    return (
-                      <div
-                        key={track.id || idx}
-                        draggable
-                        onDragStart={(e) => handleDragStart(e, idx)}
-                        onDragOver={(e) => handleDragOver(e, idx)}
-                        onDrop={(e) => handleDrop(e, idx, 'playlist')}
-                        onDragEnd={handleDragEnd}
-                        className="flat-card"
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          padding: "10px 12px",
-                          marginBottom: 8,
-                          position: "relative",
-                          opacity: isDragged ? 0.35 : 1,
-                          cursor: "grab",
-                          background: isCurrent ? "rgba(252, 60, 68, 0.08)" : "#121212",
-                          borderColor: isCurrent ? "#fc3c44" : "#222"
-                        }}
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                      <button
+                        onClick={() => setSelectedPlaylistId(null)}
+                        style={{ background: "#121212", border: "1px solid #222", color: "#fff", borderRadius: 10, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
                       >
-                        {showTopIndicator && (
-                          <div style={{
-                            position: "absolute",
-                            top: -3,
-                            left: 0,
-                            right: 0,
-                            height: 3,
-                            background: "#fc3c44",
-                            borderRadius: 2,
-                            boxShadow: "0 0 8px #fc3c44",
-                            zIndex: 20,
-                            pointerEvents: "none"
-                          }} />
-                        )}
-                        {showBottomIndicator && (
-                          <div style={{
-                            position: "absolute",
-                            bottom: -3,
-                            left: 0,
-                            right: 0,
-                            height: 3,
-                            background: "#fc3c44",
-                            borderRadius: 2,
-                            boxShadow: "0 0 8px #fc3c44",
-                            zIndex: 20,
-                            pointerEvents: "none"
-                          }} />
-                        )}
+                        ← Zurück
+                      </button>
+                      <div style={{ fontWeight: 800, fontSize: 16, color: "#fff" }}>{activePlaylist?.name}</div>
+                    </div>
 
-                        <div style={{ color: "#444", marginRight: 10, fontSize: 14, cursor: "grab" }}>
-                          ⠿
-                        </div>
-
-                        <div 
-                          onClick={() => playTrack(idx, activePlaylist.id)}
-                          style={{
-                            width: 42,
-                            height: 42,
-                            borderRadius: 8,
-                            background: "#222",
-                            overflow: "hidden",
-                            marginRight: 12,
-                            flexShrink: 0,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            cursor: "pointer"
-                          }}
-                        >
-                          {track.cover ? (
-                            <img src={track.cover} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                          ) : (
-                            <span style={{ fontSize: 18, color: "#555" }}>🎵</span>
-                          )}
-                        </div>
-
-                        <div onClick={() => playTrack(idx, activePlaylist.id)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
-                          <div style={{ fontWeight: 600, fontSize: 13, color: isCurrent ? "#fc3c44" : "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {track.title || track.name}
-                          </div>
-                          <div style={{ fontSize: 11, color: "#666", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 2 }}>
-                            {track.artist || "Unbekannter Künstler"}
-                          </div>
-                        </div>
-
-                        <div style={{ fontSize: 11, color: "#555", marginLeft: 8, marginRight: 8 }}>
-                          {formatTime(track.duration || 0)}
-                        </div>
-
-                        <button
-                          onClick={() => removeTrackFromPlaylist(activePlaylist.id, track.id)}
-                          title="Aus Playlist entfernen"
-                          style={{ background: "none", border: "none", color: "#444", fontSize: 13, cursor: "pointer", padding: 4 }}
-                        >
-                          ✕
-                        </button>
+                    {playlistTracks.length === 0 ? (
+                      <div style={{ textAlign: "center", color: "#555", padding: "60px 0", fontSize: 13 }}>
+                        Diese Playlist ist leer. Füge Titel aus der Bibliothek hinzu!
                       </div>
-                    );
-                  })
+                    ) : (
+                      playlistTracks.map((track, idx) => {
+                        const isPlayingCurrent = currentTrackId === track.id;
+                        const isDragged = draggedIndex === idx;
+                        const isDragOver = dragOverInfo && dragOverInfo.index === idx && draggedIndex !== idx;
+                        const showTopIndicator = isDragOver && dragOverInfo.position === 'above';
+                        const showBottomIndicator = isDragOver && dragOverInfo.position === 'below';
+
+                        return (
+                          <div
+                            key={track.id}
+                            draggable
+                            onDragStart={(e) => handleDragStart(e, idx)}
+                            onDragOver={(e) => handleDragOver(e, idx)}
+                            onDrop={(e) => handleDrop(e, idx, 'playlist')}
+                            onDragEnd={handleDragEnd}
+                            className="flat-card"
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              padding: "10px 12px",
+                              marginBottom: 8,
+                              position: "relative",
+                              opacity: isDragged ? 0.35 : 1,
+                              background: isPlayingCurrent ? "rgba(252, 60, 68, 0.08)" : "#121212",
+                              borderColor: isPlayingCurrent ? "#fc3c44" : "#222"
+                            }}
+                          >
+                            {showTopIndicator && (
+                              <div style={{
+                                position: "absolute",
+                                top: -3,
+                                left: 0,
+                                right: 0,
+                                height: 3,
+                                background: "#fc3c44",
+                                borderRadius: 2,
+                                boxShadow: "0 0 8px #fc3c44",
+                                zIndex: 20,
+                                pointerEvents: "none"
+                              }} />
+                            )}
+                            {showBottomIndicator && (
+                              <div style={{
+                                position: "absolute",
+                                bottom: -3,
+                                left: 0,
+                                right: 0,
+                                height: 3,
+                                background: "#fc3c44",
+                                borderRadius: 2,
+                                boxShadow: "0 0 8px #fc3c44",
+                                zIndex: 20,
+                                pointerEvents: "none"
+                              }} />
+                            )}
+
+                            <div style={{ color: "#444", marginRight: 10, fontSize: 14, cursor: "grab" }} title="Ziehen zum Sortieren">
+                              ⠿
+                            </div>
+
+                            <div 
+                              onClick={() => playTrack(track)}
+                              style={{
+                                width: 40,
+                                height: 40,
+                                borderRadius: 8,
+                                background: "#222",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                marginRight: 12,
+                                cursor: "pointer",
+                                fontSize: 16
+                              }}
+                            >
+                              🎵
+                            </div>
+
+                            <div onClick={() => playTrack(track)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                              <div style={{ fontWeight: 600, fontSize: 13, color: isPlayingCurrent ? "#fc3c44" : "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {track.title}
+                              </div>
+                              <div style={{ fontSize: 11, color: "#666", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 2 }}>
+                                {track.artist}
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={() => removeFromPlaylist(selectedPlaylistId, track.id)}
+                              style={{ background: "none", border: "none", color: "#444", fontSize: 13, cursor: "pointer", padding: 4 }}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
                 )}
               </div>
             )}
 
-            {/* --- VIEW: FULL PLAYER --- */}
-            {view === 'player' && (
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", padding: "20px 0" }}>
-                <div style={{
-                  width: 220,
-                  height: 220,
-                  borderRadius: "50%",
-                  background: "#121212",
-                  border: "4px solid #222",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginBottom: 30,
-                  boxShadow: isPlaying ? "0 0 30px rgba(252, 60, 68, 0.2)" : "none",
-                  animation: isPlaying ? "spin 12s linear infinite" : "none"
-                }}>
-                  {currentTrack && currentTrack.cover ? (
-                    <img src={currentTrack.cover} alt="" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
-                  ) : (
-                    <div style={{ width: 60, height: 60, borderRadius: "50%", background: "#fc3c44" }} />
-                  )}
-                </div>
-
-                <div style={{ textAlign: "center", marginBottom: 20, width: "100%", padding: "0 20px" }}>
-                  <div style={{ fontWeight: 800, fontSize: 18, color: "#fff", marginBottom: 4 }}>
-                    {currentTrack ? (currentTrack.title || currentTrack.name) : "Kein Titel ausgewählt"}
-                  </div>
-                  <div style={{ fontSize: 13, color: "#666" }}>
-                    {currentTrack ? (currentTrack.artist || "Unbekannter Künstler") : "—"}
-                  </div>
-                </div>
-
-                {/* Progress Bar */}
-                <div style={{ width: "100%", maxWidth: 320, marginBottom: 20 }}>
-                  <input
-                    type="range"
-                    min="0"
-                    max={duration || 100}
-                    value={currentTime}
-                    onChange={handleSeek}
-                    style={{ width: "100%" }}
-                  />
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#555", marginTop: 6 }}>
-                    <span>{formatTime(currentTime)}</span>
-                    <span>{formatTime(duration)}</span>
-                  </div>
-                </div>
-
-                {/* Main Controls */}
-                <div style={{ display: "flex", alignItems: "center", gap: 24, marginBottom: 24 }}>
-                  <button
-                    onClick={() => setIsShuffle(!isShuffle)}
-                    style={{ background: "none", border: "none", color: isShuffle ? "#fc3c44" : "#444", fontSize: 18, cursor: "pointer" }}
-                  >
-                    🔀
-                  </button>
-                  <button
-                    onClick={handlePrevTrack}
-                    style={{ background: "none", border: "none", color: "#fff", fontSize: 22, cursor: "pointer" }}
-                  >
-                    ⏮
-                  </button>
-                  <button
-                    onClick={togglePlay}
-                    style={{
-                      width: 56,
-                      height: 56,
-                      borderRadius: "50%",
-                      background: "#fc3c44",
-                      border: "none",
-                      color: "#fff",
-                      fontSize: 22,
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center"
-                    }}
-                  >
-                    {isPlaying ? "⏸" : "▶"}
-                  </button>
-                  <button
-                    onClick={handleNextTrack}
-                    style={{ background: "none", border: "none", color: "#fff", fontSize: 22, cursor: "pointer" }}
-                  >
-                    ⏭
-                  </button>
-                  <button
-                    onClick={() => setRepeatMode(repeatMode === 'off' ? 'all' : repeatMode === 'all' ? 'one' : 'off')}
-                    style={{ background: "none", border: "none", color: repeatMode !== 'off' ? "#fc3c44" : "#444", fontSize: 18, cursor: "pointer" }}
-                  >
-                    🔁 {repeatMode === 'one' && <sup style={{ fontSize: 9 }}>1</sup>}
-                  </button>
-                </div>
-
-                {/* Volume Slider */}
-                <div style={{ display: "flex", alignItems: "center", gap: 10, width: 200 }}>
-                  <span style={{ fontSize: 12, color: "#555" }}>🔈</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value={volume}
-                    onChange={handleVolumeChange}
-                    style={{ flex: 1 }}
-                  />
-                  <span style={{ fontSize: 12, color: "#555" }}>🔊</span>
-                </div>
-              </div>
-            )}
-
-            {/* --- VIEW: EQUALIZER --- */}
-            {view === 'eq' && (
-              <div style={{ padding: "10px 0" }}>
-                <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 20 }}>5-Band Equalizer</div>
+            {/* TAB: EQUALIZER */}
+            {activeTab === "eq" && (
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 16 }}>5-Band Equalizer</div>
                 <div className="flat-card" style={{ padding: 20 }}>
-                  {eqBands.map((band, idx) => (
-                    <div key={band.label} style={{ marginBottom: 18 }}>
+                  {["60Hz", "230Hz", "910Hz", "4kHz", "14kHz"].map((freq, idx) => (
+                    <div key={freq} style={{ marginBottom: 18 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#888", marginBottom: 6 }}>
-                        <span>{band.label}</span>
-                        <span style={{ color: "#fc3c44", fontWeight: 700 }}>{band.val > 0 ? `+${band.val}` : band.val} dB</span>
+                        <span>{freq}</span>
+                        <span style={{ color: "#fc3c44", fontWeight: 700 }}>{eqGains[idx] > 0 ? `+${eqGains[idx]}` : eqGains[idx]} dB</span>
                       </div>
                       <input
                         type="range"
                         min="-12"
                         max="12"
                         step="1"
-                        value={band.val}
-                        onChange={(e) => handleEQChange(idx, parseInt(e.target.value))}
+                        value={eqGains[idx]}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          const updated = [...eqGains];
+                          updated[idx] = val;
+                          setEqGains(updated);
+                          if (filtersRef.current[idx]) {
+                            filtersRef.current[idx].gain.value = val;
+                          }
+                        }}
                         style={{ width: "100%" }}
                       />
                     </div>
@@ -1090,10 +910,10 @@
               </div>
             )}
 
-            {/* --- VIEW: SETTINGS & BACKUP --- */}
-            {view === 'settings' && (
+            {/* TAB: BACKUP / RESET */}
+            {activeTab === "backup" && (
               <div>
-                <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 16 }}>Einstellungen & Sicherung</div>
+                <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 16 }}>Sicherung & Optionen</div>
 
                 <div className="flat-card" style={{ padding: 16, marginBottom: 16 }}>
                   <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Daten sichern</div>
@@ -1127,40 +947,30 @@
                   {!confirmClear ? (
                     <button
                       onClick={() => setConfirmClear(true)}
-                      style={{ width: "100%", background: "none", color: "#f87171", border: "1px solid #3d0f0f", borderRadius: 12, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+                      style={{ width: "100%", background: "none", color: "#444", border: "1px solid #222", borderRadius: 12, padding: "12px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}
                     >
                       Bibliothek löschen
                     </button>
                   ) : (
                     <div style={{ display: "flex", gap: 8 }}>
-                      <button
-                        onClick={clearLibrary}
-                        style={{ flex: 1, background: "#3d0f0f", color: "#f87171", border: "1px solid #5c1a1a", borderRadius: 12, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
-                      >
-                        Ja, alles löschen
-                      </button>
-                      <button
-                        onClick={() => setConfirmClear(false)}
-                        style={{ flex: 1, background: "#1a1a1a", color: "#888", border: "1px solid #333", borderRadius: 12, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
-                      >
-                        Abbrechen
-                      </button>
+                      <button onClick={clearLibrary} style={{ flex: 1, background: "#3d0f0f", color: "#f87171", border: "1px solid #5c1a1a", borderRadius: 12, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Ja, alles löschen</button>
+                      <button onClick={() => setConfirmClear(false)} style={{ flex: 1, background: "#1a1a1a", color: "#888", border: "1px solid #333", borderRadius: 12, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Abbrechen</button>
                     </div>
                   )}
                 </div>
 
-                <div style={{ marginTop: 16, padding: "12px 14px", background: "#0d0d0d", borderRadius: 10, fontSize: 11, color: "#444", lineHeight: 1.6 }}>
-                  ⚡ Alles wird automatisch im Browser-Speicher (IndexedDB) gesichert und bleibt beim Aktualisieren erhalten.
+                <div style={{ marginTop: 16, padding: "12px 14px", background: "#0d0d0d", borderRadius: 10, fontSize: 11, color: "#3a3a3a", lineHeight: 1.7 }}>
+                  ⚡ Alles wird automatisch im Browser gespeichert. Das Backup sichert gegen Cache-Löschung und Gerätewechsel ab.
                 </div>
               </div>
             )}
 
           </div>
 
-          {/* Bottom Persistent Mini Player */}
-          {currentTrack && view !== 'player' && (
+          {/* Bottom Persistent Mini Player Bar */}
+          {currentTrack && (
             <div 
-              onClick={() => setView('player')}
+              onClick={() => setShowPlayerModal(true)}
               style={{
                 position: "fixed",
                 bottom: 0,
@@ -1177,50 +987,97 @@
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                <div style={{ width: 38, height: 38, borderRadius: 6, background: "#222", overflow: "hidden", flexShrink: 0 }}>
-                  {currentTrack.cover ? (
-                    <img src={currentTrack.cover} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                  ) : (
-                    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🎵</div>
-                  )}
+                <div style={{ width: 38, height: 38, borderRadius: 8, background: "#222", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>
+                  🎵
                 </div>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 12, fontWeight: 700, color: "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {currentTrack.title || currentTrack.name}
+                    {currentTrack.title}
                   </div>
                   <div style={{ fontSize: 10, color: "#666", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {currentTrack.artist || "Unbekannter Künstler"}
+                    {currentTrack.artist}
                   </div>
                 </div>
               </div>
 
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <button
-                  onClick={(e) => { e.stopPropagation(); togglePlay(); }}
-                  style={{ width: 36, height: 36, borderRadius: "50%", background: "#fc3c44", border: "none", color: "#fff", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
-                >
-                  {isPlaying ? "⏸" : "▶"}
-                </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); togglePlay(); }}
+                style={{ width: 36, height: 36, borderRadius: "50%", background: "#fc3c44", border: "none", color: "#fff", fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+              >
+                {isPlaying ? "⏸" : "▶"}
+              </button>
+            </div>
+          )}
+
+          {/* Player Modal Overlay */}
+          {showPlayerModal && currentTrack && (
+            <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 1000, display: "flex", flexDirection: "column", padding: "20px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 30 }}>
+                <button onClick={() => setShowPlayerModal(false)} style={{ background: "none", border: "none", color: "#fff", fontSize: 20, cursor: "pointer" }}>✕</button>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#888" }}>JETZT SPIELT</div>
+                <div style={{ width: 20 }} />
+              </div>
+
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                <div style={{ width: 220, height: 220, borderRadius: "50%", background: "#121212", border: "4px solid #222", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 60, marginBottom: 30 }}>
+                  🎵
+                </div>
+
+                <div style={{ textAlign: "center", marginBottom: 20, width: "100%" }}>
+                  <div style={{ fontWeight: 800, fontSize: 18, color: "#fff", marginBottom: 4 }}>{currentTrack.title}</div>
+                  <div style={{ fontSize: 13, color: "#666" }}>{currentTrack.artist}</div>
+                </div>
+
+                <div style={{ width: "100%", maxWidth: 320, marginBottom: 20 }}>
+                  <input
+                    type="range"
+                    min="0"
+                    max={duration || 100}
+                    value={currentTime}
+                    onChange={handleSeek}
+                    style={{ width: "100%" }}
+                  />
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#555", marginTop: 6 }}>
+                    <span>{formatTime(currentTime)}</span>
+                    <span>{formatTime(duration)}</span>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 24, marginBottom: 24 }}>
+                  <button onClick={() => setIsShuffle(!isShuffle)} style={{ background: "none", border: "none", color: isShuffle ? "#fc3c44" : "#444", fontSize: 18, cursor: "pointer" }}>🔀</button>
+                  <button onClick={playPrevTrack} style={{ background: "none", border: "none", color: "#fff", fontSize: 22, cursor: "pointer" }}>⏮</button>
+                  <button onClick={togglePlay} style={{ width: 56, height: 56, borderRadius: "50%", background: "#fc3c44", border: "none", color: "#fff", fontSize: 22, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {isPlaying ? "⏸" : "▶"}
+                  </button>
+                  <button onClick={playNextTrack} style={{ background: "none", border: "none", color: "#fff", fontSize: 22, cursor: "pointer" }}>⏭</button>
+                  <button onClick={() => setRepeatMode(repeatMode === "none" ? "all" : repeatMode === "all" ? "one" : "none")} style={{ background: "none", border: "none", color: repeatMode !== "none" ? "#fc3c44" : "#444", fontSize: 18, cursor: "pointer" }}>
+                    🔁 {repeatMode === "one" && <sup style={{ fontSize: 9 }}>1</sup>}
+                  </button>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 10, width: 200 }}>
+                  <span style={{ fontSize: 12, color: "#555" }}>🔈</span>
+                  <input type="range" min="0" max="1" step="0.01" value={volume} onChange={handleVolume} style={{ flex: 1 }} />
+                  <span style={{ fontSize: 12, color: "#555" }}>🔊</span>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Modal: Add to Playlist */}
-          {showAddToPlaylistModal && trackToAddToPlaylist && (
+          {/* Modal: Add To Playlist */}
+          {addToPlaylistTrack && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
-              <div className="flat-card" style={{ width: "100%", maxWidth: 340, padding: 20 }}>
+              <div className="flat-card" style={{ width: "100%", maxWidth: 320, padding: 20 }}>
                 <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 12 }}>Zu Playlist hinzufügen</div>
-                <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-                  "{trackToAddToPlaylist.title || trackToAddToPlaylist.name}"
-                </div>
+                <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>"{addToPlaylistTrack.title}"</div>
 
                 {playlists.length === 0 ? (
-                  <div style={{ fontSize: 12, color: "#555", marginBottom: 16 }}>Noch keine Playlists vorhanden.</div>
+                  <div style={{ fontSize: 12, color: "#555", marginBottom: 16 }}>Keine Playlists vorhanden.</div>
                 ) : (
                   playlists.map(pl => (
                     <button
                       key={pl.id}
-                      onClick={() => addTrackToPlaylist(pl.id, trackToAddToPlaylist.id)}
+                      onClick={() => addTrackToPlaylist(pl.id, addToPlaylistTrack.id)}
                       style={{ width: "100%", background: "#1a1a1a", border: "1px solid #333", color: "#fff", borderRadius: 10, padding: "10px", fontSize: 12, fontWeight: 600, cursor: "pointer", marginBottom: 8, textAlign: "left" }}
                     >
                       📂 {pl.name}
@@ -1229,7 +1086,7 @@
                 )}
 
                 <button
-                  onClick={() => setShowAddToPlaylistModal(false)}
+                  onClick={() => setAddToPlaylistTrack(null)}
                   style={{ width: "100%", background: "none", border: "none", color: "#888", padding: "10px", fontSize: 12, cursor: "pointer", marginTop: 8 }}
                 >
                   Abbrechen
@@ -1239,9 +1096,9 @@
           )}
 
           {/* Modal: Create Playlist */}
-          {showCreatePlaylistModal && (
+          {playlistModalOpen && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
-              <div className="flat-card" style={{ width: "100%", maxWidth: 340, padding: 20 }}>
+              <div className="flat-card" style={{ width: "100%", maxWidth: 320, padding: 20 }}>
                 <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 16 }}>Neue Playlist erstellen</div>
                 <input
                   type="text"
@@ -1258,7 +1115,7 @@
                     Erstellen
                   </button>
                   <button
-                    onClick={() => setShowCreatePlaylistModal(false)}
+                    onClick={() => setPlaylistModalOpen(false)}
                     style={{ flex: 1, background: "#1a1a1a", color: "#888", border: "1px solid #333", borderRadius: 10, padding: "10px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
                   >
                     Abbrechen
