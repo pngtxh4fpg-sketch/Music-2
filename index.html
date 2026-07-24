@@ -28,7 +28,6 @@
 const { useState, useRef, useEffect, useCallback, useMemo } = React;
 
 // ─── IndexedDB ────────────────────────────────────────────────────────────────
-// v3: neuer Store 'playlists' für benannte Wiedergabelisten
 const DB_NAME    = 'ColdEnginePlayerDB';
 const DB_VERSION = 3;
 const ITEM_H     = 65;
@@ -38,14 +37,10 @@ const getDB = () => new Promise((resolve, reject) => {
   if (_db) return resolve(_db);
   const req = indexedDB.open(DB_NAME, DB_VERSION);
   req.onupgradeneeded = ({ target: { result: db, transaction: upgradeTx }, oldVersion }) => {
-    if (!db.objectStoreNames.contains('tracks'))
-      db.createObjectStore('tracks', { keyPath: 'id' });
-    if (!db.objectStoreNames.contains('settings'))
-      db.createObjectStore('settings', { keyPath: 'key' });
-    if (!db.objectStoreNames.contains('tracksMetadata'))
-      db.createObjectStore('tracksMetadata', { keyPath: 'id' });
-    if (!db.objectStoreNames.contains('playlists'))
-      db.createObjectStore('playlists', { keyPath: 'id' });
+    if (!db.objectStoreNames.contains('tracks'))        db.createObjectStore('tracks', { keyPath: 'id' });
+    if (!db.objectStoreNames.contains('settings'))      db.createObjectStore('settings', { keyPath: 'key' });
+    if (!db.objectStoreNames.contains('tracksMetadata')) db.createObjectStore('tracksMetadata', { keyPath: 'id' });
+    if (!db.objectStoreNames.contains('playlists'))     db.createObjectStore('playlists', { keyPath: 'id' });
     if (oldVersion === 1) {
       const meta = upgradeTx.objectStore('tracksMetadata');
       const cur  = upgradeTx.objectStore('tracks').openCursor();
@@ -114,17 +109,20 @@ const base64ToBlob = (dataURL) => {
   return new Blob([arr], { type: mime });
 };
 const formatTime = (s) => { if (!s || isNaN(s)) return "0:00"; return `${Math.floor(s/60)}:${Math.floor(s%60).toString().padStart(2,"0")}`; };
-// Dateinamen parsen: "SongName_Künstler_Album" → { name, artist, album }
+
+// iOS maps '/' to ':' internally in filenames — reverse that in all parsed parts.
 const parseFilename = (filename) => {
-  const base     = filename.replace(/\.[^/.]+$/, '');
-  const isTuned  = base.endsWith('_tuned');
-  const clean    = isTuned ? base.slice(0, -6) : base;
-  const parts    = clean.split('_');
-  const name     = (parts[0] || clean) + (isTuned ? ' 🔊' : '');
-  const artist   = parts[1] || null;
-  const album    = parts[2] || null;
+  const base    = filename.replace(/\.[^/.]+$/, '');
+  const isTuned = base.endsWith('_tuned');
+  const clean   = isTuned ? base.slice(0, -6) : base;
+  const parts   = clean.split('_');
+  const fix     = s => s ? s.replace(/:/g, '/') : s;
+  const name    = fix(parts[0] || clean) + (isTuned ? ' 🔊' : '');
+  const artist  = fix(parts[1]) || null;
+  const album   = fix(parts[2]) || null;
   return { name, artist, album };
 };
+
 const MusicNote = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#666" strokeWidth="1.5" strokeLinecap="round">
     <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
@@ -133,10 +131,13 @@ const MusicNote = () => (
 const ChevronRight = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#444" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
 );
+const BackArrow = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+);
 const GripIcon = () => (
   <svg width="12" height="16" viewBox="0 0 12 16" style={{touchAction:'none',userSelect:'none',cursor:'grab'}}>
-    <circle cx="4" cy="3.5" r="1.4" fill="#3a3a3a"/>  <circle cx="8" cy="3.5" r="1.4" fill="#3a3a3a"/>
-    <circle cx="4" cy="8"   r="1.4" fill="#3a3a3a"/>  <circle cx="8" cy="8"   r="1.4" fill="#3a3a3a"/>
+    <circle cx="4" cy="3.5"  r="1.4" fill="#3a3a3a"/> <circle cx="8" cy="3.5"  r="1.4" fill="#3a3a3a"/>
+    <circle cx="4" cy="8"    r="1.4" fill="#3a3a3a"/> <circle cx="8" cy="8"    r="1.4" fill="#3a3a3a"/>
     <circle cx="4" cy="12.5" r="1.4" fill="#3a3a3a"/> <circle cx="8" cy="12.5" r="1.4" fill="#3a3a3a"/>
   </svg>
 );
@@ -154,16 +155,20 @@ function MusicPlayer() {
   const [shuffle, setShuffle]         = useState(false);
 
   // Playlists
-  const [playlists, setPlaylists]         = useState([]);
-  const [activeCtxId, setActiveCtxId]     = useState(null); // null = Bibliothek
-  const [browseView, setBrowseView]       = useState('home'); // 'home'|'library'|plId|'picker:'+plId
-  const [newPlName, setNewPlName]         = useState('');
+  const [playlists, setPlaylists]           = useState([]);
+  const [activeCtxId, setActiveCtxId]       = useState(null); // null | plId | 'artist:NAME' | 'album:NAME||ALBUM'
+  const [browseView, setBrowseView]         = useState('home');
+  const [newPlName, setNewPlName]           = useState('');
   const [showNewPlInput, setShowNewPlInput] = useState(false);
-  const [editingPlId, setEditingPlId]     = useState(null);
-  const [editingPlName, setEditingPlName] = useState('');
-  // Drag-and-Drop state
+
+  // Sub-tabs in Titelliste
+  const [listTab, setListTab]         = useState('songs'); // 'songs'|'artists'|'playlists'
+  const [artistCovers, setArtistCovers] = useState({});   // { artistName: base64 }
+  const [albumCovers, setAlbumCovers]   = useState({});   // { 'ARTIST||ALBUM': base64 }
+
+  // Drag-and-Drop
   const [isDragging, setIsDragging] = useState(false);
-  const [dContext,   setDContext]   = useState(null);   // 'home'|'library'|plId
+  const [dContext,   setDContext]   = useState(null);
   const [dActiveIdx, setDActiveIdx] = useState(null);
   const [dDropIdx,   setDDropIdx]   = useState(null);
 
@@ -178,15 +183,15 @@ function MusicPlayer() {
   const [listScrollTop, setListScrollTop] = useState(0);
   const [listHeight, setListHeight]       = useState(500);
 
-  // Einstellungen / EQ
+  // EQ / Tuner
   const [renderTrackIdx, setRenderTrackIdx] = useState("");
   const [eqBass, setEqBass]     = useState(0);
   const [eqMid, setEqMid]       = useState(0);
   const [eqTreble, setEqTreble] = useState(0);
   const [isRendering, setIsRendering] = useState(false);
-  const [previewPlaying, setPreviewPlaying]     = useState(false);
-  const [previewTime, setPreviewTime]           = useState(0);
-  const [previewDuration, setPreviewDuration]   = useState(0);
+  const [previewPlaying, setPreviewPlaying]   = useState(false);
+  const [previewTime, setPreviewTime]         = useState(0);
+  const [previewDuration, setPreviewDuration] = useState(0);
   const [previewScrubbing, setPreviewScrubbing] = useState(false);
   const [headphoneOnly, setHeadphoneOnly]           = useState(false);
   const [headphonesDetected, setHeadphonesDetected] = useState(null);
@@ -195,6 +200,8 @@ function MusicPlayer() {
   const audioRef         = useRef(null);
   const fileInputRef     = useRef(null);
   const artInputRef      = useRef(null);
+  const extraArtInputRef = useRef(null);  // for artist/album cover upload
+  const artUploadCbRef   = useRef(null);  // callback set before triggering extraArtInputRef
   const importRef        = useRef(null);
   const previewAudioRef  = useRef(null);
   const audioCtxRef      = useRef(null);
@@ -203,16 +210,37 @@ function MusicPlayer() {
   const trebleNodeRef    = useRef(null);
   const playedHistoryRef = useRef([]);
   const listContainerRef = useRef(null);
-  const dragSt        = useRef(null);   // live drag data
-  const commitDragRef = useRef(null);   // function called on drop
+  const dragSt           = useRef(null);
+  const commitDragRef    = useRef(null);
 
   // ─── Derived ──────────────────────────────────────────────────────────────
-  // Wiedergabeliste = Bibliothek oder aktive Playlist
   const contextTracks = useMemo(() => {
     if (!activeCtxId) return tracks;
+    if (activeCtxId.startsWith('artist:')) {
+      const name = activeCtxId.slice(7);
+      return tracks.filter(t => (t.artist || 'Unbekannt') === name);
+    }
+    if (activeCtxId.startsWith('album:')) {
+      const [artistName, albumName] = activeCtxId.slice(6).split('||');
+      return tracks.filter(t => (t.artist || 'Unbekannt') === artistName && (t.album || 'Unbekanntes Album') === albumName);
+    }
     const pl = playlists.find(p => p.id === activeCtxId);
     return pl ? pl.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean) : tracks;
   }, [tracks, playlists, activeCtxId]);
+
+  // Build artist → { albums → tracks[] } map
+  const artistMap = useMemo(() => {
+    const map = new Map();
+    tracks.forEach(t => {
+      const artist = t.artist || 'Unbekannt';
+      if (!map.has(artist)) map.set(artist, new Map());
+      const albums = map.get(artist);
+      const album  = t.album || 'Unbekanntes Album';
+      if (!albums.has(album)) albums.set(album, []);
+      albums.get(album).push(t);
+    });
+    return map;
+  }, [tracks]);
 
   const currentTrack    = currentIdx !== null ? contextTracks[currentIdx] : null;
   const previewProgress = previewDuration ? (previewTime / previewDuration) * 100 : 0;
@@ -220,7 +248,6 @@ function MusicPlayer() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 3500); };
 
-  // currentIdx validieren wenn Context wechselt
   useEffect(() => {
     if (currentIdx !== null && currentIdx >= contextTracks.length) setCurrentIdx(null);
   }, [contextTracks, currentIdx]);
@@ -233,7 +260,15 @@ function MusicPlayer() {
           dbGetAll('tracksMetadata'), dbGetAll('settings'), dbGetAll('playlists'),
         ]);
         const s = {};
-        dbSettings.forEach(({ key, value }) => { s[key] = value; });
+        const acCovers = {}, alcCovers = {};
+        dbSettings.forEach(({ key, value }) => {
+          if      (key.startsWith('ac:'))  acCovers[key.slice(3)]  = value;
+          else if (key.startsWith('alc:')) alcCovers[key.slice(4)] = value;
+          else s[key] = value;
+        });
+        if (Object.keys(acCovers).length)  setArtistCovers(acCovers);
+        if (Object.keys(alcCovers).length) setAlbumCovers(alcCovers);
+
         if (s.eqBass        !== undefined) setEqBass(s.eqBass);
         if (s.eqMid         !== undefined) setEqMid(s.eqMid);
         if (s.eqTreble      !== undefined) setEqTreble(s.eqTreble);
@@ -249,11 +284,22 @@ function MusicPlayer() {
           const loaded = sorted.map(t => ({ id: t.id, name: t.name, artist: t.artist || null, album: t.album || null, url: null, art: t.art || null, originalFilename: t.originalFilename || null }));
           setTracks(loaded);
           if (s.currentTrackId) {
-            const idx = loaded.findIndex(t => t.id === s.currentTrackId);
+            // Find position in the restored context, not the full library
+            const restoredCtxId = s.activeCtxId;
+            let ctxList;
+            if (!restoredCtxId)                           ctxList = loaded;
+            else if (restoredCtxId.startsWith('artist:')) ctxList = loaded.filter(t => (t.artist||'Unbekannt') === restoredCtxId.slice(7));
+            else if (restoredCtxId.startsWith('album:'))  {
+              const [a, al] = restoredCtxId.slice(6).split('||');
+              ctxList = loaded.filter(t => (t.artist||'Unbekannt') === a && (t.album||'Unbekanntes Album') === al);
+            } else {
+              const pl = dbPlaylists.find(p => p.id === restoredCtxId);
+              ctxList = pl ? pl.trackIds.map(id => loaded.find(t => t.id === id)).filter(Boolean) : loaded;
+            }
+            const idx = ctxList.findIndex(t => t.id === s.currentTrackId);
             if (idx !== -1) setCurrentIdx(idx);
           }
         }
-        if (s.activeCtxId !== undefined) setActiveCtxId(s.activeCtxId);
         if (dbPlaylists.length > 0) {
           const plOrd = s.playlistOrder || [];
           setPlaylists([
@@ -272,25 +318,26 @@ function MusicPlayer() {
     if (!dbLoaded) return;
     const t = setTimeout(() => {
       const toSave = {
-        eqBass, eqMid, eqTreble, volume, repeat, shuffle, headphoneOnly, activeCtxId, playlistOrder: playlists.map(p=>p.id),
+        eqBass, eqMid, eqTreble, volume, repeat, shuffle, headphoneOnly, activeCtxId,
+        playlistOrder:  playlists.map(p => p.id),
         trackOrder:     tracks.map(t => t.id),
         currentTrackId: currentIdx !== null ? (contextTracks[currentIdx]?.id ?? null) : null,
       };
       Promise.all(Object.entries(toSave).map(([key, value]) => dbPut('settings', { key, value }))).catch(console.error);
     }, 600);
     return () => clearTimeout(t);
-  }, [eqBass, eqMid, eqTreble, volume, repeat, shuffle, headphoneOnly, activeCtxId, tracks, currentIdx, dbLoaded, contextTracks]);
+  }, [eqBass, eqMid, eqTreble, volume, repeat, shuffle, headphoneOnly, activeCtxId, tracks, currentIdx, dbLoaded, contextTracks, playlists]);
 
   // ─── Virtual scroll container messen ──────────────────────────────────────
   useEffect(() => {
-    if ((view !== "playlist" || (browseView !== 'library' && !playlists.some(p => p.id === browseView) && !browseView.startsWith('picker:'))) || !listContainerRef.current) return;
+    if (view !== "playlist" || !listContainerRef.current) return;
     setListHeight(listContainerRef.current.clientHeight || 500);
     setListScrollTop(0);
-  }, [view, browseView, playlists]);
+  }, [view, listTab, browseView]);
 
   const handleVolumeChange = (v) => { setVolume(v); if (audioRef.current) audioRef.current.volume = v; };
 
-  // ─── Kopfhörererkennung ───────────────────────────────────────────────────
+  // ─── Headphone detection ──────────────────────────────────────────────────
   const detectHeadphones = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) { setHeadphonesDetected(null); return null; }
     try {
@@ -389,10 +436,19 @@ function MusicPlayer() {
 
   useEffect(() => {
     if (!("mediaSession" in navigator) || !currentTrack) return;
-    navigator.mediaSession.metadata = new MediaMetadata({ title: currentTrack.name, artist: currentTrack.artist || (activeCtxId ? (playlists.find(p => p.id === activeCtxId)?.name || "Music") : "Music"), album: currentTrack.album || '', artwork: currentTrack.art ? [{ src: currentTrack.art, sizes: "300x300", type: "image/jpeg" }] : [] });
-    navigator.mediaSession.setActionHandler("play", () => { audioRef.current?.play(); setPlaying(true); });
-    navigator.mediaSession.setActionHandler("pause", () => { audioRef.current?.pause(); setPlaying(false); });
-    navigator.mediaSession.setActionHandler("nexttrack", goNext);
+    const ctxLabel = activeCtxId?.startsWith('artist:') ? activeCtxId.slice(7)
+      : activeCtxId?.startsWith('album:') ? activeCtxId.slice(6).split('||')[0]
+      : activeCtxId ? (playlists.find(p => p.id === activeCtxId)?.name || "Music")
+      : "Music";
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: currentTrack.name,
+      artist: currentTrack.artist || ctxLabel,
+      album:  currentTrack.album || '',
+      artwork: currentTrack.art ? [{ src: currentTrack.art, sizes: "300x300", type: "image/jpeg" }] : [],
+    });
+    navigator.mediaSession.setActionHandler("play",          () => { audioRef.current?.play(); setPlaying(true); });
+    navigator.mediaSession.setActionHandler("pause",         () => { audioRef.current?.pause(); setPlaying(false); });
+    navigator.mediaSession.setActionHandler("nexttrack",     goNext);
     navigator.mediaSession.setActionHandler("previoustrack", goPrev);
   }, [currentTrack, activeCtxId, playlists, goNext, goPrev]);
 
@@ -405,15 +461,11 @@ function MusicPlayer() {
     const imageFiles = all.filter(isImageFile);
     if (!audioFiles.length && !imageFiles.length) { showToast("Keine Audio- oder Bilddateien erkannt!"); return; }
 
-    // 1. Audio-Tracks hinzufügen
     let addedTracks = [];
     if (audioFiles.length > 0) {
       const newTracks = audioFiles.map((f, i) => {
         const { name, artist, album } = parseFilename(f.name);
-        return {
-          id: `t-${Date.now()}-${i}-${Math.random().toString(36).slice(2)}`,
-          name, artist, album, blob: f, art: null, originalFilename: f.name,
-        };
+        return { id: `t-${Date.now()}-${i}-${Math.random().toString(36).slice(2)}`, name, artist, album, blob: f, art: null, originalFilename: f.name };
       });
       await Promise.all([
         ...newTracks.map(t => dbPut('tracks',         { id: t.id, blob: t.blob })),
@@ -423,12 +475,9 @@ function MusicPlayer() {
       setTracks(prev => [...prev, ...addedTracks]);
     }
 
-    // 2. Bilder → Songs per Dateiname zuordnen
-    // "You Be Illin, It's Tricky.jpg" → Song "You Be Illin" UND "It's Tricky" bekommen dieses Cover
     if (imageFiles.length > 0) {
-      const allTracks   = [...tracks, ...addedTracks]; // Snapshot inkl. gerade hinzugefügte
-      const artUpdates  = new Map(); // trackId → base64 art
-
+      const allTracks  = [...tracks, ...addedTracks];
+      const artUpdates = new Map();
       for (const imgFile of imageFiles) {
         const base  = imgFile.name.replace(/\.[^/.]+$/, "");
         const names = base.split(',').map(s => s.trim()).filter(Boolean);
@@ -438,7 +487,6 @@ function MusicPlayer() {
           if (names.some(n => n.toLowerCase() === t.name.toLowerCase())) artUpdates.set(t.id, art);
         }
       }
-
       if (artUpdates.size > 0) {
         setTracks(prev => prev.map(t => artUpdates.has(t.id) ? { ...t, art: artUpdates.get(t.id) } : t));
         for (const [trackId, art] of artUpdates) {
@@ -449,7 +497,6 @@ function MusicPlayer() {
           } catch (err) { console.error('Cover-Zuweisung Fehler:', err); }
         }
       }
-
       const parts = [];
       if (audioFiles.length) parts.push(`${audioFiles.length} Titel geladen`);
       if (artUpdates.size)   parts.push(`${artUpdates.size} Cover zugeordnet`);
@@ -477,13 +524,33 @@ function MusicPlayer() {
     e.target.value = "";
   };
 
+  // Artist / Album cover upload
+  const handleExtraArt = (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !artUploadCbRef.current) return;
+    const r = new FileReader();
+    r.onload = (ev) => { artUploadCbRef.current(ev.target.result); artUploadCbRef.current = null; };
+    r.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  const setArtistCover = (artistName, b64) => {
+    setArtistCovers(prev => ({ ...prev, [artistName]: b64 }));
+    dbPut('settings', { key: `ac:${artistName}`, value: b64 }).catch(console.error);
+  };
+
+  const setAlbumCover = (artistName, albumName, b64) => {
+    const key = `${artistName}||${albumName}`;
+    setAlbumCovers(prev => ({ ...prev, [key]: b64 }));
+    dbPut('settings', { key: `alc:${key}`, value: b64 }).catch(console.error);
+  };
+
   const removeTrack = (idx, e) => {
     e.stopPropagation();
     const track = tracks[idx];
     if (track.url) URL.revokeObjectURL(track.url);
     dbDelete('tracks', track.id).catch(console.error);
     dbDelete('tracksMetadata', track.id).catch(console.error);
-    // Aus allen Playlists entfernen
     const updPls = playlists.map(pl => pl.trackIds.includes(track.id) ? { ...pl, trackIds: pl.trackIds.filter(id => id !== track.id) } : pl);
     setPlaylists(updPls);
     updPls.filter((pl, i) => pl !== playlists[i]).forEach(pl => dbPut('playlists', pl).catch(console.error));
@@ -494,18 +561,6 @@ function MusicPlayer() {
     } else if (currentIdx !== null) {
       const newCtx = contextTracks.filter(t => t.id !== track.id);
       if (currentIdx >= newCtx.length) setCurrentIdx(Math.max(0, newCtx.length - 1));
-    }
-  };
-
-  const moveTrack = (index, dir) => {
-    if (index + dir < 0 || index + dir >= tracks.length) return;
-    const updated = [...tracks];
-    [updated[index], updated[index + dir]] = [updated[index + dir], updated[index]];
-    const currId = currentIdx !== null ? contextTracks[currentIdx]?.id : null;
-    setTracks(updated);
-    if (currId) {
-      const newIdx = (!activeCtxId ? updated : updated.filter(t => playlists.find(p => p.id === activeCtxId)?.trackIds.includes(t.id))).findIndex(t => t.id === currId);
-      if (newIdx !== -1) setCurrentIdx(newIdx);
     }
   };
 
@@ -550,24 +605,10 @@ function MusicPlayer() {
     }
   };
 
-  const moveTrackInPlaylist = async (plId, fromIdx, toIdx) => {
-    let updated;
-    setPlaylists(prev => prev.map(pl => {
-      if (pl.id !== plId) return pl;
-      const ids = [...pl.trackIds];
-      [ids[fromIdx], ids[toIdx]] = [ids[toIdx], ids[fromIdx]];
-      updated = { ...pl, trackIds: ids };
-      return updated;
-    }));
-    if (updated) await dbPut('playlists', updated);
-    // currentIdx anpassen wenn diese Playlist aktiv ist
-    if (activeCtxId === plId && currentIdx !== null) {
-      if (currentIdx === fromIdx) setCurrentIdx(toIdx);
-      else if (currentIdx === toIdx) setCurrentIdx(fromIdx);
-    }
+  const spliceMove = (arr, from, to) => {
+    const r = [...arr]; const [x] = r.splice(from, 1); r.splice(to, 0, x); return r;
   };
 
-  // ─── Playlist-Reihenfolge (Splice) ───────────────────────────────────────
   const movePlTo = (from, to) => {
     if (from === to) return;
     const newArr = spliceMove(playlists, from, to);
@@ -575,7 +616,6 @@ function MusicPlayer() {
     newArr.forEach(pl => dbPut('playlists', pl).catch(console.error));
   };
 
-  // Track innerhalb Playlist (Splice, sicher gegen "tote" IDs) ──────────────
   const moveTrackInPlaylistTo = (plId, from, to) => {
     if (from === to) return;
     setPlaylists(prev => {
@@ -589,25 +629,19 @@ function MusicPlayer() {
       return newPls;
     });
     if (activeCtxId === plId && currentIdx !== null) {
-      if      (currentIdx === from)                                   setCurrentIdx(to);
-      else if (from < to && currentIdx > from && currentIdx <= to)   setCurrentIdx(currentIdx - 1);
-      else if (from > to && currentIdx >= to && currentIdx < from)   setCurrentIdx(currentIdx + 1);
+      if      (currentIdx === from)                                  setCurrentIdx(to);
+      else if (from < to && currentIdx > from && currentIdx <= to)  setCurrentIdx(currentIdx - 1);
+      else if (from > to && currentIdx >= to && currentIdx < from)  setCurrentIdx(currentIdx + 1);
     }
   };
 
-  // ─── Drag-and-Drop engine ──────────────────────────────────────────────────
-  // Fixes: setPointerCapture (no lost drags), passive:false (blocks scroll),
-  // touch-action:none on rows, dContext to separate list namespaces.
-  const spliceMove = (arr, from, to) => {
-    const r = [...arr]; const [x] = r.splice(from,1); r.splice(to,0,x); return r;
-  };
+  // ─── Drag-and-Drop ────────────────────────────────────────────────────────
   const startDrag = (e, idx, listLen, commitFn, ctx) => {
     e.preventDefault();
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
-    // walk up to find the row element (data-row attribute)
     const el = e.currentTarget.parentElement;
-    if (el) { el.style.opacity='0.55'; el.style.background='#1a1a1a'; }
-    dragSt.current = { startY:e.clientY, startIdx:idx, dropIdx:idx, listLen, el };
+    if (el) { el.style.opacity = '0.55'; el.style.background = '#1a1a1a'; }
+    dragSt.current = { startY: e.clientY, startIdx: idx, dropIdx: idx, listLen, el };
     commitDragRef.current = commitFn;
     setDContext(ctx); setDActiveIdx(idx); setDDropIdx(idx); setIsDragging(true);
   };
@@ -615,21 +649,20 @@ function MusicPlayer() {
   useEffect(() => {
     if (!isDragging) return;
     const onMove = (e) => {
-      e.preventDefault(); // MUST prevent default to stop scroll on touch
+      e.preventDefault();
       const ds = dragSt.current; if (!ds) return;
       const delta = e.clientY - ds.startY;
       if (ds.el) ds.el.style.transform = `translateY(${delta}px)`;
-      const nd = Math.max(0, Math.min(ds.listLen-1, ds.startIdx + Math.round(delta / ITEM_H)));
+      const nd = Math.max(0, Math.min(ds.listLen - 1, ds.startIdx + Math.round(delta / ITEM_H)));
       if (nd !== ds.dropIdx) { ds.dropIdx = nd; setDDropIdx(nd); }
     };
     const onEnd = () => {
       const ds = dragSt.current; if (!ds) return;
-      if (ds.el) { ds.el.style.transform=''; ds.el.style.opacity=''; ds.el.style.background=''; }
+      if (ds.el) { ds.el.style.transform = ''; ds.el.style.opacity = ''; ds.el.style.background = ''; }
       if (ds.dropIdx !== ds.startIdx) commitDragRef.current?.(ds.startIdx, ds.dropIdx);
       setIsDragging(false); setDActiveIdx(null); setDDropIdx(null); setDContext(null);
       dragSt.current = null;
     };
-    // passive:false is required so we can call e.preventDefault() in onMove
     window.addEventListener('pointermove',   onMove, { passive: false });
     window.addEventListener('pointerup',     onEnd);
     window.addEventListener('pointercancel', onEnd);
@@ -640,11 +673,9 @@ function MusicPlayer() {
     };
   }, [isDragging]);
 
-  // Library-Song Reihenfolge ändern (splice, nicht swap)
   const moveTrackTo = (from, to) => {
     if (from === to) return;
     const newArr = spliceMove(tracks, from, to);
-    // currentIdx mitführen wenn Bibliotheks-Kontext aktiv
     if (!activeCtxId && currentIdx !== null) {
       const curId = tracks[currentIdx]?.id;
       const ni = newArr.findIndex(t => t.id === curId);
@@ -662,8 +693,7 @@ function MusicPlayer() {
       const order  = tracks.map(t => t.id);
       const sorted = order.map(id => dbMeta.find(t => t.id === id)).filter(Boolean);
       const backup = {
-        version: 3,
-        exportDate: new Date().toISOString(),
+        version: 3, exportDate: new Date().toISOString(),
         settings: { eqBass, eqMid, eqTreble, repeat, shuffle },
         tracks: sorted.map(t => ({ id: t.id, name: t.name, artist: t.artist || null, album: t.album || null, originalFilename: t.originalFilename || null, art: t.art || null })),
         playlists: playlists.map(pl => ({ id: pl.id, name: pl.name, trackIds: pl.trackIds })),
@@ -685,7 +715,7 @@ function MusicPlayer() {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
     e.target.value = "";
-    const jsonFile = files.find(f => f.name.endsWith('.json') || f.type === 'application/json');
+    const jsonFile   = files.find(f => f.name.endsWith('.json') || f.type === 'application/json');
     const audioFiles = files.filter(f => isAudioFile(f));
     if (!jsonFile) { showToast("Keine Backup-Datei (.json) gefunden."); return; }
     setIsImporting(true); showToast("Importiere Backup...");
@@ -696,7 +726,7 @@ function MusicPlayer() {
       tracks.forEach(t => { if (t.url) URL.revokeObjectURL(t.url); });
       await dbClear('tracks'); await dbClear('tracksMetadata'); await dbClear('playlists'); await dbClear('settings');
       setPlaying(false); setCurrentIdx(null); setCurrentTime(0); setDuration(0);
-      setRenderTrackIdx(""); setActiveCtxId(null); setBrowseView('home');
+      setRenderTrackIdx(""); setActiveCtxId(null); setBrowseView('home'); setListTab('songs');
       const s = backup.settings || {};
       setEqBass(s.eqBass ?? 0); setEqMid(s.eqMid ?? 0); setEqTreble(s.eqTreble ?? 0);
       setRepeat(s.repeat ?? false); setShuffle(s.shuffle ?? false);
@@ -710,7 +740,6 @@ function MusicPlayer() {
       }
       await Promise.all([...matched.map(t => dbPut('tracks', { id: t.id, blob: t.blob })), ...matched.map(t => dbPut('tracksMetadata', { id: t.id, name: t.name, artist: t.artist, album: t.album, art: t.art, originalFilename: t.originalFilename }))]);
       setTracks(matched.map(t => ({ id: t.id, name: t.name, artist: t.artist, album: t.album, url: URL.createObjectURL(t.blob), art: t.art, originalFilename: t.originalFilename })));
-      // Playlists wiederherstellen (nur Tracks die gematcht wurden)
       if (Array.isArray(backup.playlists) && backup.playlists.length > 0) {
         const matchedIds = new Set(matched.map(t => t.id));
         const restoredPls = backup.playlists.map(pl => ({ ...pl, trackIds: pl.trackIds.filter(id => matchedIds.has(id)) }));
@@ -728,8 +757,9 @@ function MusicPlayer() {
     await Promise.all([dbClear('tracks'), dbClear('tracksMetadata'), dbClear('playlists'), dbClear('settings')]).catch(console.error);
     setTracks([]); setPlaylists([]); setCurrentIdx(null); setPlaying(false);
     setCurrentTime(0); setDuration(0); setEqBass(0); setEqMid(0); setEqTreble(0);
-    setRepeat(false); setShuffle(false); setActiveCtxId(null); setBrowseView('home');
-    setRenderTrackIdx(""); playedHistoryRef.current = [];
+    setRepeat(false); setShuffle(false); setActiveCtxId(null); setBrowseView('home'); setListTab('songs');
+    setRenderTrackIdx(""); setArtistCovers({}); setAlbumCovers({});
+    playedHistoryRef.current = [];
     showToast("Bibliothek gelöscht.");
   };
 
@@ -841,11 +871,18 @@ function MusicPlayer() {
   const vsEnd      = Math.min(tracks.length - 1, Math.ceil((listScrollTop + listHeight) / ITEM_H) + 3);
   const totalListH = tracks.length * ITEM_H;
 
-  // ─── Helpers für Render ───────────────────────────────────────────────────
+  // ─── Render Helpers ───────────────────────────────────────────────────────
   const TrackThumbnail = ({ art, size = 40 }) => (
     <div style={{ width: size, height: size, borderRadius: 8, background: "#181818", flexShrink: 0, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", border: "1px solid #222" }}>
       {art ? <img src={art} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} /> : <MusicNote />}
     </div>
+  );
+
+  const CoverUploadBtn = ({ onPick }) => (
+    <button onClick={onPick}
+      style={{ background:"#1e1e1e", border:"1px solid #2a2a2a", borderRadius:6, color:"#888", fontSize:11, padding:"3px 8px", cursor:"pointer", flexShrink:0 }}>
+      Cover
+    </button>
   );
 
   const PlaylistCover = ({ pl, size = 44 }) => {
@@ -873,6 +910,26 @@ function MusicPlayer() {
     );
   };
 
+  // ─── Shared styles ────────────────────────────────────────────────────────
+  const subHeaderStyle = {
+    display:"flex", alignItems:"center", padding:"12px 14px",
+    borderBottom:"1px solid #1e1e1e", gap:10, flexShrink:0,
+  };
+  const playBtnStyle = (active) => ({
+    width:"100%", background:active?"#fc3c44":"#1a1a1a",
+    border:`1px solid ${active?"#fc3c44":"#2a2a2a"}`,
+    borderRadius:10, color:active?"#fff":"#888",
+    padding:"9px", fontSize:13, fontWeight:700, cursor:"pointer",
+    display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+  });
+
+  // ─── Active context label for player ─────────────────────────────────────
+  const ctxLabel = activeCtxId
+    ? activeCtxId.startsWith('artist:') ? activeCtxId.slice(7)
+    : activeCtxId.startsWith('album:')  ? activeCtxId.slice(6).split('||')[1]
+    : playlists.find(p => p.id === activeCtxId)?.name || "Playlist"
+    : null;
+
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div style={{ height:"100%", display:"flex", flexDirection:"column", alignItems:"center", padding:"16px 16px 20px" }}>
@@ -880,9 +937,10 @@ function MusicPlayer() {
 
         <audio ref={audioRef} preload="auto" playsInline />
         <audio ref={previewAudioRef} preload="auto" playsInline />
-        <input ref={fileInputRef} type="file" accept="audio/*, image/*, .m4a, .mp4, audio/mp4, audio/x-m4a" multiple style={{ display:"none" }} onChange={(e) => { handleFiles(e.target.files); e.target.value=""; }} />
-        <input ref={artInputRef}  type="file" accept="image/*" style={{ display:"none" }} onChange={handleArtFile} />
-        <input ref={importRef}    type="file" accept=".json,application/json,audio/*,.m4a,.mp3,.wav,.ogg,.flac,.aac,.opus,.mp4" multiple style={{ display:"none" }} onChange={importBackup} />
+        <input ref={fileInputRef}     type="file" accept="audio/*, image/*, .m4a, .mp4, audio/mp4, audio/x-m4a" multiple style={{ display:"none" }} onChange={(e) => { handleFiles(e.target.files); e.target.value=""; }} />
+        <input ref={artInputRef}      type="file" accept="image/*" style={{ display:"none" }} onChange={handleArtFile} />
+        <input ref={extraArtInputRef} type="file" accept="image/*" style={{ display:"none" }} onChange={handleExtraArt} />
+        <input ref={importRef}        type="file" accept=".json,application/json,audio/*,.m4a,.mp3,.wav,.ogg,.flac,.aac,.opus,.mp4" multiple style={{ display:"none" }} onChange={importBackup} />
 
         {toast && (
           <div style={{ position:"absolute", top:16, left:"50%", transform:"translateX(-50%)", background:"#1a1a1a", border:"1px solid #333", color:"#fff", padding:"10px 20px", borderRadius:12, fontSize:13, zIndex:100, textAlign:"center", width:"90%", maxWidth:320 }}>
@@ -905,7 +963,7 @@ function MusicPlayer() {
           </button>
         </div>
 
-        {/* Tabs */}
+        {/* Main Tabs */}
         <div style={{ display:"flex", background:"#111", borderRadius:10, padding:3, marginBottom:20, border:"1px solid #222", flexShrink:0 }}>
           {["player","playlist","tuning"].map(v => (
             <button key={v} onClick={() => setView(v)} style={{ flex:1, padding:"8px 0", borderRadius:8, border:"none", cursor:"pointer", fontSize:11, fontWeight:600, background:view===v?"#222":"transparent", color:view===v?"#fff":"#666" }}>
@@ -921,9 +979,9 @@ function MusicPlayer() {
               {currentTrack?.art ? <img src={currentTrack.art} alt="cover" style={{ width:"100%", height:"100%", objectFit:"cover" }} /> : <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#333" strokeWidth="1.5" strokeLinecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>}
               {currentTrack && <button onClick={() => artInputRef.current?.click()} style={{ position:"absolute", bottom:12, right:12, background:"rgba(0,0,0,0.7)", border:"1px solid #333", borderRadius:8, color:"#fff", padding:"4px 8px", fontSize:11, cursor:"pointer" }}>Cover ändern</button>}
             </div>
-            {activeCtxId && (
+            {ctxLabel && (
               <div style={{ fontSize:10, color:"#fc3c44", fontWeight:700, letterSpacing:"0.08em", marginBottom:6 }}>
-                ▶ {playlists.find(p => p.id === activeCtxId)?.name || "Playlist"}
+                ▶ {ctxLabel}
               </div>
             )}
             <div style={{ marginBottom:20 }}>
@@ -987,105 +1045,48 @@ function MusicPlayer() {
         {view === "playlist" && (
           <div style={{ flex:1, display:"flex", flexDirection:"column", minHeight:0 }}>
 
-            {/* HOME: Playlist-Übersicht */}
-            {browseView === 'home' && (
-              <div className="flat-card" style={{ flex:1, overflowY:"auto" }}>
-                {/* Alle Titel */}
-                <div onClick={() => { setBrowseView('library'); setActiveCtxId(null); }}
-                  style={{ display:"flex", alignItems:"center", padding:"14px 16px", gap:12, borderBottom:"1px solid #1a1a1a", cursor:"pointer" }}>
-                  <div style={{ width:40, height:40, borderRadius:10, background:"#1a1a1a", border:"1px solid #2a2a2a", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#666" strokeWidth="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-                  </div>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontSize:14, fontWeight:700, color:"#fff" }}>Alle Titel</div>
-                    <div style={{ fontSize:11, color:"#555", marginTop:2 }}>{tracks.length} Titel · Bibliothek</div>
-                  </div>
-                  {!activeCtxId && currentTrack && <div style={{ fontSize:10, color:"#fc3c44", fontWeight:700 }}>▶</div>}
-                  <ChevronRight />
-                </div>
+            {/* Sub-tabs: Titel | Künstler | Playlists */}
+            <div style={{ display:"flex", background:"#111", borderRadius:10, padding:3, marginBottom:12, border:"1px solid #222", flexShrink:0 }}>
+              {[['songs','Titel'],['artists','Künstler'],['playlists','Playlists']].map(([tab, label]) => (
+                <button key={tab} onClick={() => {
+                  setListTab(tab);
+                  setBrowseView(tab === 'playlists' ? 'home' : '');
+                }} style={{ flex:1, padding:"8px 0", borderRadius:8, border:"none", cursor:"pointer", fontSize:11, fontWeight:600, background:listTab===tab?"#222":"transparent", color:listTab===tab?"#fff":"#666" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
 
-                {/* Playlists – drag-and-drop sortierbar */}
-                {playlists.map((pl, plIdx) => {
-                  const count    = pl.trackIds.filter(id => tracks.some(t => t.id === id)).length;
-                  const isActive = activeCtxId === pl.id;
-                  const isThis   = dContext === 'home' && dActiveIdx === plIdx;
-                  const isDrop   = dContext === 'home' && dDropIdx === plIdx && dActiveIdx !== null && dActiveIdx !== plIdx;
-                  return (
-                    <div key={pl.id}
-                      style={{
-                        display:"flex", alignItems:"center", padding:"10px 10px 10px 6px", gap:8,
-                        borderBottom:"1px solid #1a1a1a",
-                        borderTop: isDrop && dDropIdx < dActiveIdx ? '2px solid #fc3c44' : undefined,
-                        borderBottomColor: isDrop && dDropIdx >= dActiveIdx ? '#fc3c44' : '#1a1a1a',
-                        background: isActive ? "#0d0d0d" : "transparent",
-                        userSelect:"none",
-                      }}>
-                      {/* Grip handle – pointerdown hier startet den Drag */}
-                      <div onPointerDown={e => { e.stopPropagation(); startDrag(e, plIdx, playlists.length, movePlTo, 'home'); }}
-                        style={{ padding:"4px 6px", cursor:"grab", flexShrink:0, touchAction:"none" }}>
-                        <GripIcon />
-                      </div>
-                      {/* Cover + Info */}
-                      <div onClick={() => setBrowseView(pl.id)} style={{ display:"flex", alignItems:"center", gap:10, flex:1, minWidth:0, cursor:"pointer" }}>
-                        <PlaylistCover pl={pl} size={44} />
-                        <div style={{ minWidth:0 }}>
-                          <div style={{ fontSize:14, fontWeight:700, color:isActive?"#fc3c44":"#fff", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{pl.name}</div>
-                          <div style={{ fontSize:11, color:"#555", marginTop:2 }}>{count} Titel{isActive ? " · Aktiv" : ""}</div>
-                        </div>
-                      </div>
-                      <div onClick={() => setBrowseView(pl.id)} style={{ cursor:"pointer", flexShrink:0 }}><ChevronRight /></div>
-                    </div>
-                  );
-                })}
+            {/* ══ TITEL TAB ══ */}
 
-                {/* Neue Playlist */}
-                <div style={{ padding:"14px 16px" }}>
-                  {showNewPlInput ? (
-                    <div style={{ display:"flex", gap:8 }}>
-                      <input autoFocus value={newPlName} onChange={e => setNewPlName(e.target.value)}
-                        onKeyDown={e => { if(e.key==='Enter') createPlaylist(); if(e.key==='Escape') { setShowNewPlInput(false); setNewPlName(''); } }}
-                        placeholder="Playlist-Name"
-                        style={{ flex:1, background:"#1a1a1a", border:"1px solid #333", borderRadius:10, padding:"8px 12px", color:"#fff", fontSize:13, outline:"none" }} />
-                      <button onClick={createPlaylist} style={{ background:"#fc3c44", border:"none", borderRadius:10, color:"#fff", padding:"8px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Erstellen</button>
-                      <button onClick={() => { setShowNewPlInput(false); setNewPlName(''); }} style={{ background:"#222", border:"none", borderRadius:10, color:"#666", padding:"8px 12px", fontSize:13, cursor:"pointer" }}>✕</button>
-                    </div>
-                  ) : (
-                    <button onClick={() => setShowNewPlInput(true)}
-                      style={{ width:"100%", background:"none", border:"1px dashed #2a2a2a", borderRadius:12, color:"#555", padding:"10px", fontSize:13, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
-                      <span style={{ fontSize:16, lineHeight:1 }}>+</span> Neue Playlist
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* BIBLIOTHEK: alle Titel (virtual scroll) */}
-            {browseView === 'library' && (
+            {/* All tracks list */}
+            {listTab === 'songs' && browseView === '' && (
               <div className="flat-card" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
-                <div style={{ display:"flex", alignItems:"center", padding:"12px 14px", borderBottom:"1px solid #1e1e1e", gap:10, flexShrink:0 }}>
-                  <button onClick={() => setBrowseView('home')} className="icon-btn" style={{ color:"#666" }}>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-                  </button>
-                  <span style={{ fontSize:15, fontWeight:800 }}>Alle Titel</span>
-                  <span style={{ fontSize:11, color:"#444", marginLeft:"auto" }}>{tracks.length}</span>
+                <div style={{ display:"flex", alignItems:"center", padding:"10px 14px", borderBottom:"1px solid #1e1e1e", flexShrink:0 }}>
+                  <span style={{ fontSize:12, color:"#444", fontWeight:600 }}>{tracks.length} Titel</span>
                 </div>
                 <div ref={listContainerRef} onScroll={(e) => setListScrollTop(e.currentTarget.scrollTop)} style={{ flex:1, overflowY:"auto", position:"relative" }}>
                   <div style={{ height:totalListH, position:"relative" }}>
+                    {tracks.length === 0 && (
+                      <div style={{ padding:32, textAlign:"center", color:"#444", fontSize:13 }}>
+                        Noch keine Musik. Tippe oben auf „+ Musik laden".
+                      </div>
+                    )}
                     {Array.from({ length: Math.max(0, vsEnd-vsStart+1) }, (_, vi) => {
                       const i = vsStart + vi;
                       if (i >= tracks.length) return null;
                       const t = tracks[i];
                       const isCurrent = !activeCtxId && contextTracks[currentIdx]?.id === t.id;
-                      const isLibDrag = dContext === 'library';
-                      const isLibDrop = isLibDrag && dDropIdx === i && dActiveIdx !== null && dActiveIdx !== i;
+                      const isLibDrag  = dContext === 'library';
+                      const isLibDrop  = isLibDrag && dDropIdx === i && dActiveIdx !== null && dActiveIdx !== i;
                       return (
                         <div key={t.id}
-                          style={{ position:"absolute", top:i*ITEM_H, left:0, right:0, height:ITEM_H, display:"flex", alignItems:"center", padding:"0 8px 0 2px", gap:6,
-                            background: (isLibDrag && dActiveIdx===i) ? "#1e1e1e" : isCurrent ? "#1a1a1a" : "transparent",
-                            borderTop: (isLibDrop && dDropIdx < dActiveIdx) ? '2px solid #fc3c44' : undefined,
-                            borderBottom: (isLibDrop && dDropIdx >= dActiveIdx) ? '2px solid #fc3c44' : '1px solid #1a1a1a',
+                          style={{ position:"absolute", top:i*ITEM_H, left:0, right:0, height:ITEM_H,
+                            display:"flex", alignItems:"center", padding:"0 8px 0 2px", gap:6,
+                            background:(isLibDrag && dActiveIdx===i) ? "#1e1e1e" : isCurrent ? "#1a1a1a" : "transparent",
+                            borderTop:(isLibDrop && dDropIdx < dActiveIdx) ? '2px solid #fc3c44' : undefined,
+                            borderBottom:(isLibDrop && dDropIdx >= dActiveIdx) ? '2px solid #fc3c44' : '1px solid #1a1a1a',
                             boxSizing:"border-box" }}>
-                          {/* Grip */}
                           <div onPointerDown={e => { e.stopPropagation(); startDrag(e, i, tracks.length, moveTrackTo, 'library'); }}
                             style={{ padding:"4px 6px", cursor:"grab", flexShrink:0, touchAction:"none" }}>
                             <GripIcon />
@@ -1115,18 +1116,16 @@ function MusicPlayer() {
               </div>
             )}
 
-            {/* TRACK ZU PLAYLIST HINZUFÜGEN (Auswahl bei mehreren Playlists) */}
-            {browseView.startsWith('addto:') && (() => {
+            {/* Add to playlist picker (from songs tab) */}
+            {listTab === 'songs' && browseView.startsWith('addto:') && (() => {
               const trackId = browseView.split(':')[1];
               const t = tracks.find(tr => tr.id === trackId);
               return (
                 <div className="flat-card" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
-                  <div style={{ display:"flex", alignItems:"center", padding:"12px 14px", borderBottom:"1px solid #1e1e1e", gap:10, flexShrink:0 }}>
-                    <button onClick={() => setBrowseView('library')} className="icon-btn" style={{ color:"#666" }}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-                    </button>
+                  <div style={subHeaderStyle}>
+                    <button onClick={() => setBrowseView('')} className="icon-btn" style={{ color:"#666" }}><BackArrow /></button>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:13, fontWeight:700, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>Zu Playlist hinzufügen</div>
+                      <div style={{ fontSize:13, fontWeight:700 }}>Zu Playlist hinzufügen</div>
                       <div style={{ fontSize:11, color:"#555" }}>{t?.name}</div>
                     </div>
                   </div>
@@ -1134,9 +1133,9 @@ function MusicPlayer() {
                     {playlists.map(pl => {
                       const alreadyIn = pl.trackIds.includes(trackId);
                       return (
-                        <div key={pl.id} onClick={() => { if (!alreadyIn) { addTrackToPlaylist(pl.id, trackId); showToast(`Zu "${pl.name}" hinzugefügt`); } setBrowseView('library'); }}
+                        <div key={pl.id} onClick={() => { if (!alreadyIn) { addTrackToPlaylist(pl.id, trackId); showToast(`Zu "${pl.name}" hinzugefügt`); } setBrowseView(''); }}
                           style={{ display:"flex", alignItems:"center", padding:"14px 16px", gap:12, borderBottom:"1px solid #1a1a1a", cursor:alreadyIn?"default":"pointer", opacity:alreadyIn?0.4:1 }}>
-                          <div style={{ flex:1, fontSize:14, fontWeight:600, color:"#fff" }}>{pl.name}</div>
+                          <div style={{ flex:1, fontSize:14, fontWeight:600 }}>{pl.name}</div>
                           <div style={{ fontSize:12, color:alreadyIn?"#555":"#fc3c44", fontWeight:700 }}>{alreadyIn ? "Bereits drin" : "+ Hinzufügen"}</div>
                         </div>
                       );
@@ -1146,18 +1145,227 @@ function MusicPlayer() {
               );
             })()}
 
-            {/* PLAYLIST DETAIL */}
-            {playlists.some(p => p.id === browseView) && (() => {
+            {/* ══ KÜNSTLER TAB ══ */}
+
+            {/* Artist list */}
+            {listTab === 'artists' && browseView === '' && (
+              <div className="flat-card" style={{ flex:1, overflowY:"auto" }}>
+                {artistMap.size === 0 ? (
+                  <div style={{ padding:32, textAlign:"center", color:"#444", fontSize:13 }}>
+                    Keine Titel mit Künstler-Info.<br />
+                    <span style={{ fontSize:11, color:"#333" }}>Format: Titel_Künstler_Album.mp3</span>
+                  </div>
+                ) : [...artistMap.entries()].sort(([a],[b]) => a.localeCompare(b)).map(([artistName, albums]) => {
+                  const trackCount = [...albums.values()].reduce((s, ts) => s + ts.length, 0);
+                  const cover = artistCovers[artistName] || [...albums.values()].flat().find(t => t.art)?.art || null;
+                  const isActive = activeCtxId === `artist:${artistName}`;
+                  return (
+                    <div key={artistName} onClick={() => setBrowseView(`artist:${artistName}`)}
+                      style={{ display:"flex", alignItems:"center", padding:"10px 14px", gap:12, borderBottom:"1px solid #1a1a1a", cursor:"pointer", background:isActive?"#0d0d0d":"transparent" }}>
+                      <TrackThumbnail art={cover} size={48} />
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:14, fontWeight:700, color:isActive?"#fc3c44":"#fff", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{artistName}</div>
+                        <div style={{ fontSize:11, color:"#555", marginTop:2 }}>{albums.size} Album{albums.size!==1?"s":""} · {trackCount} Titel</div>
+                      </div>
+                      {isActive && <div style={{ fontSize:10, color:"#fc3c44", fontWeight:700 }}>▶</div>}
+                      <ChevronRight />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Artist detail */}
+            {listTab === 'artists' && browseView.startsWith('artist:') && !browseView.startsWith('artist:') && null /* placeholder */}
+            {listTab === 'artists' && (() => {
+              if (!browseView.startsWith('artist:') || browseView.startsWith('album:')) return null;
+              const artistName = browseView.slice(7);
+              const albums = artistMap.get(artistName);
+              if (!albums) return null;
+              const artistCover = artistCovers[artistName] || [...albums.values()].flat().find(t => t.art)?.art || null;
+              const totalTracks = [...albums.values()].reduce((s, ts) => s + ts.length, 0);
+              const isActive = activeCtxId === `artist:${artistName}`;
+              const allArtistTracks = [...albums.values()].flat();
+              return (
+                <div className="flat-card" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+                  <div style={subHeaderStyle}>
+                    <button onClick={() => setBrowseView('')} className="icon-btn" style={{ color:"#666" }}><BackArrow /></button>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:15, fontWeight:800, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{artistName}</div>
+                      <div style={{ fontSize:11, color:"#555" }}>{albums.size} Alben · {totalTracks} Titel{isActive ? " · Aktiv" : ""}</div>
+                    </div>
+                    <CoverUploadBtn onPick={() => {
+                      artUploadCbRef.current = (b64) => setArtistCover(artistName, b64);
+                      extraArtInputRef.current?.click();
+                    }} />
+                  </div>
+
+                  {/* Artist cover */}
+                  {artistCover && (
+                    <div style={{ padding:"14px 16px 0", flexShrink:0 }}>
+                      <div style={{ width:72, height:72, borderRadius:36, overflow:"hidden", border:"2px solid #222" }}>
+                        <img src={artistCover} style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Play all */}
+                  <div style={{ padding:"12px 14px", flexShrink:0 }}>
+                    <button onClick={() => { setActiveCtxId(`artist:${artistName}`); playTrack(0, allArtistTracks); setView("player"); }}
+                      style={playBtnStyle(isActive)}>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                      {isActive ? "Wird gespielt" : "Alle abspielen"}
+                    </button>
+                  </div>
+
+                  {/* Album list */}
+                  <div style={{ flex:1, overflowY:"auto" }}>
+                    {[...albums.entries()].map(([albumName, albumTracks]) => {
+                      const albumKey   = `${artistName}||${albumName}`;
+                      const albumCover = albumCovers[albumKey] || albumTracks.find(t => t.art)?.art || null;
+                      const isAlbActive = activeCtxId === `album:${albumKey}`;
+                      return (
+                        <div key={albumName} onClick={() => setBrowseView(`album:${albumKey}`)}
+                          style={{ display:"flex", alignItems:"center", padding:"10px 14px", gap:12, borderBottom:"1px solid #1a1a1a", cursor:"pointer", background:isAlbActive?"#0d0d0d":"transparent" }}>
+                          <TrackThumbnail art={albumCover} size={48} />
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:14, fontWeight:600, color:isAlbActive?"#fc3c44":"#fff", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{albumName}</div>
+                            <div style={{ fontSize:11, color:"#555", marginTop:2 }}>{albumTracks.length} Titel</div>
+                          </div>
+                          {isAlbActive && <div style={{ fontSize:10, color:"#fc3c44", fontWeight:700 }}>▶</div>}
+                          <ChevronRight />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Album detail */}
+            {listTab === 'artists' && browseView.startsWith('album:') && (() => {
+              const [artistName, albumName] = browseView.slice(6).split('||');
+              const albumKey    = `${artistName}||${albumName}`;
+              const albumTracks = tracks.filter(t => (t.artist||'Unbekannt') === artistName && (t.album||'Unbekanntes Album') === albumName);
+              const albumCover  = albumCovers[albumKey] || albumTracks.find(t => t.art)?.art || null;
+              const isActive    = activeCtxId === `album:${albumKey}`;
+              return (
+                <div className="flat-card" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+                  <div style={subHeaderStyle}>
+                    <button onClick={() => setBrowseView(`artist:${artistName}`)} className="icon-btn" style={{ color:"#666" }}><BackArrow /></button>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:15, fontWeight:800, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{albumName}</div>
+                      <div style={{ fontSize:11, color:"#555" }}>{artistName} · {albumTracks.length} Titel{isActive ? " · Aktiv" : ""}</div>
+                    </div>
+                    <CoverUploadBtn onPick={() => {
+                      artUploadCbRef.current = (b64) => setAlbumCover(artistName, albumName, b64);
+                      extraArtInputRef.current?.click();
+                    }} />
+                  </div>
+
+                  {/* Album cover */}
+                  {albumCover && (
+                    <div style={{ padding:"14px 16px 0", flexShrink:0 }}>
+                      <div style={{ width:72, height:72, borderRadius:10, overflow:"hidden", border:"1px solid #222" }}>
+                        <img src={albumCover} style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Play all */}
+                  {albumTracks.length > 0 && (
+                    <div style={{ padding:"12px 14px", flexShrink:0 }}>
+                      <button onClick={() => { setActiveCtxId(`album:${albumKey}`); playTrack(0, albumTracks); setView("player"); }}
+                        style={playBtnStyle(isActive)}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                        {isActive ? "Wird gespielt" : "Wiedergabe"}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Track list */}
+                  <div style={{ flex:1, overflowY:"auto" }}>
+                    {albumTracks.map((t, i) => {
+                      const isCur = isActive && contextTracks[currentIdx]?.id === t.id;
+                      return (
+                        <div key={t.id} onClick={() => { setActiveCtxId(`album:${albumKey}`); playTrack(i, albumTracks); setView("player"); }}
+                          style={{ display:"flex", alignItems:"center", padding:"10px 14px", gap:12, borderBottom:"1px solid #1a1a1a", cursor:"pointer", background:isCur?"#1a1a1a":"transparent" }}>
+                          <div style={{ width:24, textAlign:"center", fontSize:12, color:isCur?"#fc3c44":"#444", fontWeight:isCur?800:400, flexShrink:0 }}>
+                            {isCur ? <svg width="10" height="10" viewBox="0 0 24 24" fill="#fc3c44"><polygon points="6 3 20 12 6 21 6 3"/></svg> : i+1}
+                          </div>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:14, fontWeight:isCur?800:500, color:isCur?"#fc3c44":"#fff", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.name}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ══ PLAYLISTS TAB ══ */}
+
+            {/* Playlist home */}
+            {listTab === 'playlists' && browseView === 'home' && (
+              <div className="flat-card" style={{ flex:1, overflowY:"auto" }}>
+                {playlists.map((pl, plIdx) => {
+                  const count    = pl.trackIds.filter(id => tracks.some(t => t.id === id)).length;
+                  const isActive = activeCtxId === pl.id;
+                  const isThis   = dContext === 'home' && dActiveIdx === plIdx;
+                  const isDrop   = dContext === 'home' && dDropIdx === plIdx && dActiveIdx !== null && dActiveIdx !== plIdx;
+                  return (
+                    <div key={pl.id}
+                      style={{ display:"flex", alignItems:"center", padding:"10px 10px 10px 6px", gap:8, borderBottom:"1px solid #1a1a1a",
+                        borderTop: isDrop && dDropIdx < dActiveIdx ? '2px solid #fc3c44' : undefined,
+                        borderBottomColor: isDrop && dDropIdx >= dActiveIdx ? '#fc3c44' : '#1a1a1a',
+                        background:isActive?"#0d0d0d":"transparent", userSelect:"none" }}>
+                      <div onPointerDown={e => { e.stopPropagation(); startDrag(e, plIdx, playlists.length, movePlTo, 'home'); }}
+                        style={{ padding:"4px 6px", cursor:"grab", flexShrink:0, touchAction:"none" }}>
+                        <GripIcon />
+                      </div>
+                      <div onClick={() => setBrowseView(pl.id)} style={{ display:"flex", alignItems:"center", gap:10, flex:1, minWidth:0, cursor:"pointer" }}>
+                        <PlaylistCover pl={pl} size={44} />
+                        <div style={{ minWidth:0 }}>
+                          <div style={{ fontSize:14, fontWeight:700, color:isActive?"#fc3c44":"#fff", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{pl.name}</div>
+                          <div style={{ fontSize:11, color:"#555", marginTop:2 }}>{count} Titel{isActive ? " · Aktiv" : ""}</div>
+                        </div>
+                      </div>
+                      <div onClick={() => setBrowseView(pl.id)} style={{ cursor:"pointer", flexShrink:0 }}><ChevronRight /></div>
+                    </div>
+                  );
+                })}
+
+                {/* New playlist */}
+                <div style={{ padding:"14px 16px" }}>
+                  {showNewPlInput ? (
+                    <div style={{ display:"flex", gap:8 }}>
+                      <input autoFocus value={newPlName} onChange={e => setNewPlName(e.target.value)}
+                        onKeyDown={e => { if(e.key==='Enter') createPlaylist(); if(e.key==='Escape') { setShowNewPlInput(false); setNewPlName(''); } }}
+                        placeholder="Playlist-Name"
+                        style={{ flex:1, background:"#1a1a1a", border:"1px solid #333", borderRadius:10, padding:"8px 12px", color:"#fff", fontSize:13, outline:"none" }} />
+                      <button onClick={createPlaylist} style={{ background:"#fc3c44", border:"none", borderRadius:10, color:"#fff", padding:"8px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Erstellen</button>
+                      <button onClick={() => { setShowNewPlInput(false); setNewPlName(''); }} style={{ background:"#222", border:"none", borderRadius:10, color:"#666", padding:"8px 12px", fontSize:13, cursor:"pointer" }}>✕</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setShowNewPlInput(true)}
+                      style={{ width:"100%", background:"none", border:"1px dashed #2a2a2a", borderRadius:12, color:"#555", padding:"10px", fontSize:13, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+                      <span style={{ fontSize:16, lineHeight:1 }}>+</span> Neue Playlist
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Playlist detail */}
+            {listTab === 'playlists' && playlists.some(p => p.id === browseView) && (() => {
               const pl = playlists.find(p => p.id === browseView);
               const plTracks = pl.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean);
               const isActive = activeCtxId === pl.id;
               return (
                 <div className="flat-card" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
-                  {/* Header */}
-                  <div style={{ display:"flex", alignItems:"center", padding:"12px 14px", borderBottom:"1px solid #1e1e1e", gap:10, flexShrink:0 }}>
-                    <button onClick={() => setBrowseView('home')} className="icon-btn" style={{ color:"#666" }}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-                    </button>
+                  <div style={subHeaderStyle}>
+                    <button onClick={() => setBrowseView('home')} className="icon-btn" style={{ color:"#666" }}><BackArrow /></button>
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontSize:15, fontWeight:800, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{pl.name}</div>
                       <div style={{ fontSize:11, color:"#555", marginTop:1 }}>{plTracks.length} Titel{isActive ? " · Wird gespielt" : ""}</div>
@@ -1166,31 +1374,26 @@ function MusicPlayer() {
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
                     </button>
                   </div>
-
-                  {/* Play-Button */}
                   {plTracks.length > 0 && (
                     <div style={{ padding:"10px 14px", borderBottom:"1px solid #1a1a1a", flexShrink:0 }}>
-                      <button onClick={() => { setActiveCtxId(pl.id); playTrack(0, plTracks); setView("player"); }}
-                        style={{ width:"100%", background:isActive?"#fc3c44":"#1a1a1a", border:`1px solid ${isActive?"#fc3c44":"#2a2a2a"}`, borderRadius:10, color:isActive?"#fff":"#888", padding:"9px", fontSize:13, fontWeight:700, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
+                      <button onClick={() => { setActiveCtxId(pl.id); playTrack(0, plTracks); setView("player"); }} style={playBtnStyle(isActive)}>
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>
                         {isActive ? "Wird gespielt" : "Wiedergabe"}
                       </button>
                     </div>
                   )}
-
-                  {/* Track-Liste */}
                   <div ref={listContainerRef} onScroll={(e) => setListScrollTop(e.currentTarget.scrollTop)} style={{ flex:1, overflowY:"auto" }}>
                     {plTracks.length === 0 ? (
                       <div style={{ padding:32, textAlign:"center", color:"#444", fontSize:12 }}>Noch keine Titel. Tippe unten auf „+ Titel hinzufügen".</div>
                     ) : plTracks.map((t, i) => {
-                      const isCur = isActive && contextTracks[currentIdx]?.id === t.id;
+                      const isCur   = isActive && contextTracks[currentIdx]?.id === t.id;
                       const isPlDrop = dContext === pl.id && dDropIdx === i && dActiveIdx !== null && dActiveIdx !== i;
                       return (
                         <div key={t.id}
                           style={{ display:"flex", alignItems:"center", padding:"10px 8px 10px 2px", gap:6,
-                            background: (dContext===pl.id && dActiveIdx===i) ? "#1e1e1e" : isCur ? "#1a1a1a" : "transparent",
-                            borderTop: (isPlDrop && dDropIdx < dActiveIdx) ? '2px solid #fc3c44' : undefined,
-                            borderBottom: (isPlDrop && dDropIdx >= dActiveIdx) ? '2px solid #fc3c44' : '1px solid #1a1a1a' }}>
+                            background:(dContext===pl.id && dActiveIdx===i) ? "#1e1e1e" : isCur ? "#1a1a1a" : "transparent",
+                            borderTop:(isPlDrop && dDropIdx < dActiveIdx) ? '2px solid #fc3c44' : undefined,
+                            borderBottom:(isPlDrop && dDropIdx >= dActiveIdx) ? '2px solid #fc3c44' : '1px solid #1a1a1a' }}>
                           <div onPointerDown={e => { e.stopPropagation(); startDrag(e, i, plTracks.length, (from, to) => moveTrackInPlaylistTo(pl.id, from, to), pl.id); }}
                             style={{ padding:"4px 6px", cursor:"grab", flexShrink:0, touchAction:"none" }}>
                             <GripIcon />
@@ -1209,7 +1412,6 @@ function MusicPlayer() {
                         </div>
                       );
                     })}
-                    {/* Titel hinzufügen */}
                     <div style={{ padding:"12px 14px" }}>
                       <button onClick={() => setBrowseView(`picker:${pl.id}`)}
                         style={{ width:"100%", background:"none", border:"1px dashed #2a2a2a", borderRadius:10, color:"#555", padding:"9px", fontSize:13, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
@@ -1221,17 +1423,15 @@ function MusicPlayer() {
               );
             })()}
 
-            {/* PICKER: Titel zu Playlist hinzufügen */}
-            {browseView.startsWith('picker:') && (() => {
+            {/* Track picker for playlist */}
+            {listTab === 'playlists' && browseView.startsWith('picker:') && (() => {
               const plId = browseView.split(':')[1];
               const pl   = playlists.find(p => p.id === plId);
               const available = tracks.filter(t => !pl?.trackIds.includes(t.id));
               return (
                 <div className="flat-card" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
-                  <div style={{ display:"flex", alignItems:"center", padding:"12px 14px", borderBottom:"1px solid #1e1e1e", gap:10, flexShrink:0 }}>
-                    <button onClick={() => setBrowseView(plId)} className="icon-btn" style={{ color:"#666" }}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-                    </button>
+                  <div style={subHeaderStyle}>
+                    <button onClick={() => setBrowseView(plId)} className="icon-btn" style={{ color:"#666" }}><BackArrow /></button>
                     <div style={{ flex:1 }}>
                       <div style={{ fontSize:13, fontWeight:700 }}>Zu „{pl?.name}" hinzufügen</div>
                       <div style={{ fontSize:11, color:"#555", marginTop:1 }}>{available.length} verfügbar</div>
@@ -1245,7 +1445,8 @@ function MusicPlayer() {
                         style={{ display:"flex", alignItems:"center", padding:"10px 14px", gap:12, borderBottom:"1px solid #1a1a1a", cursor:"pointer" }}>
                         <TrackThumbnail art={t.art} />
                         <div style={{ flex:1, minWidth:0 }}>
-                          <div style={{ fontSize:14, fontWeight:500, color:"#fff", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.name}</div>
+                          <div style={{ fontSize:14, fontWeight:500, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.name}</div>
+                          {t.artist && <div style={{ fontSize:11, color:"#555", marginTop:1 }}>{t.artist}</div>}
                         </div>
                         <div style={{ fontSize:14, color:"#fc3c44", fontWeight:700, paddingLeft:8 }}>+</div>
                       </div>
