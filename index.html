@@ -281,7 +281,19 @@ function MusicPlayer() {
         if (dbMeta.length > 0) {
           const order  = s.trackOrder || [];
           const sorted = [...order.map(id => dbMeta.find(t => t.id === id)).filter(Boolean), ...dbMeta.filter(t => !order.includes(t.id))];
-          const loaded = sorted.map(t => ({ id: t.id, name: t.name, artist: t.artist || null, album: t.album || null, url: null, art: t.art || null, originalFilename: t.originalFilename || null }));
+          // iOS HFS+/APFS stores '/' as ':' in filenames → migrate any stored ':' back to '/'
+          const fixColon = s => s ? s.replace(/:/g, '/') : null;
+          const toMigrate = [];
+          const loaded = sorted.map(t => {
+            const name   = fixColon(t.name)   || '';
+            const artist = fixColon(t.artist) || null;
+            const album  = fixColon(t.album)  || null;
+            if (name !== t.name || artist !== t.artist || album !== t.album)
+              toMigrate.push({ ...t, name, artist, album });
+            return { id: t.id, name, artist, album, url: null, art: t.art || null, originalFilename: t.originalFilename || null };
+          });
+          if (toMigrate.length)
+            Promise.all(toMigrate.map(t => dbPut('tracksMetadata', t))).catch(console.error);
           setTracks(loaded);
           if (s.currentTrackId) {
             // Find position in the restored context, not the full library
