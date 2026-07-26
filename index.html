@@ -455,15 +455,14 @@ function MusicPlayer() {
   // Register action handlers ONCE on mount with stable refs.
   // This prevents iOS from re-classifying the session as a "podcast" (which shows
   // 10-second skip buttons instead of prev/next) after every track change.
-  // Explicitly null-ing seekbackward/seekforward forces iOS into music mode.
+  // Do NOT touch seekbackward/seekforward at all — even setting them to null
+  // can trigger iOS to show seek controls instead of skip controls.
   useEffect(() => {
     if (!('mediaSession' in navigator)) return;
     navigator.mediaSession.setActionHandler('play',          () => { audioRef.current?.play(); setPlaying(true); });
     navigator.mediaSession.setActionHandler('pause',         () => { audioRef.current?.pause(); setPlaying(false); });
     navigator.mediaSession.setActionHandler('nexttrack',     () => goNextRef.current?.());
     navigator.mediaSession.setActionHandler('previoustrack', () => goPrevRef.current?.());
-    try { navigator.mediaSession.setActionHandler('seekbackward', null); } catch (_) {}
-    try { navigator.mediaSession.setActionHandler('seekforward',  null); } catch (_) {}
   }, []);
 
   // Update metadata whenever the track changes
