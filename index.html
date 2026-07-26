@@ -448,26 +448,21 @@ function MusicPlayer() {
     return () => { audio.removeEventListener("timeupdate", onTime); audio.removeEventListener("loadedmetadata", onDur); audio.removeEventListener("ended", onEnded); };
   }, [goNext, repeat, isScrubbing]);
 
-  // Keep refs current so the stable handlers below always call the latest version
+  // Keep refs current so handlers never go stale
   useEffect(() => { goNextRef.current = goNext; }, [goNext]);
   useEffect(() => { goPrevRef.current = goPrev; }, [goPrev]);
 
-  // Register action handlers ONCE on mount with stable refs.
-  // This prevents iOS from re-classifying the session as a "podcast" (which shows
-  // 10-second skip buttons instead of prev/next) after every track change.
-  // Do NOT touch seekbackward/seekforward at all — even setting them to null
-  // can trigger iOS to show seek controls instead of skip controls.
+  // Single mediaSession effect — handlers + metadata + playbackState must all be set
+  // atomically so iOS sees next/prev handlers at the exact moment playbackState = 'playing'.
+  // Splitting into multiple effects causes iOS to briefly see no handlers → podcast mode.
   useEffect(() => {
     if (!('mediaSession' in navigator)) return;
     navigator.mediaSession.setActionHandler('play',          () => { audioRef.current?.play(); setPlaying(true); });
     navigator.mediaSession.setActionHandler('pause',         () => { audioRef.current?.pause(); setPlaying(false); });
     navigator.mediaSession.setActionHandler('nexttrack',     () => goNextRef.current?.());
     navigator.mediaSession.setActionHandler('previoustrack', () => goPrevRef.current?.());
-  }, []);
-
-  // Update metadata whenever the track changes
-  useEffect(() => {
-    if (!('mediaSession' in navigator) || !currentTrack) return;
+    navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+    if (!currentTrack) return;
     const ctxLabel = activeCtxId?.startsWith('artist:') ? activeCtxId.slice(7)
       : activeCtxId?.startsWith('album:') ? activeCtxId.slice(6).split('||')[1]
       : activeCtxId ? (playlists.find(p => p.id === activeCtxId)?.name || 'Music')
@@ -478,13 +473,7 @@ function MusicPlayer() {
       album:   currentTrack.album  || '',
       artwork: currentTrack.art ? [{ src: currentTrack.art, sizes: '300x300', type: 'image/jpeg' }] : [],
     });
-  }, [currentTrack, activeCtxId, playlists]);
-
-  // Sync playbackState — required on some iOS versions to show the correct controls
-  useEffect(() => {
-    if (!('mediaSession' in navigator)) return;
-    navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
-  }, [playing]);
+  }, [currentTrack, playing, activeCtxId, playlists]);
 
   const isImageFile = (f) => f.type.startsWith('image/') || /\.(jpe?g|png|gif|webp|avif)$/i.test(f.name);
 
