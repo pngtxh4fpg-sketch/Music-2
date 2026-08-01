@@ -7,6 +7,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -665,6 +666,21 @@ function MusicPlayer() {
 
     setTracks(prev => [...prev, ...newTracks.map(t => ({ ...t, url: URL.createObjectURL(t.blob) }))]);
     showToast(`${newTracks.length} Titel aus Ordner geladen`);
+
+    // Auto-detect Music_Backup.json in the selected folder
+    const jsonFiles = all.filter(f => f.name.endsWith('.json'));
+    for (const jf of jsonFiles) {
+      try {
+        const backup = JSON.parse(await jf.text());
+        if (backup.version >= 4) {
+          // Pass freshly-imported tracks so playlist matching works immediately
+          const fresh = newTracks.map(t => ({ ...t, url: '' }));
+          await applyBackupV4(backup, fresh);
+          showToast(`${newTracks.length} Titel + Backup wiederhergestellt`);
+          break;
+        }
+      } catch (_) {}
+    }
   };
 
   const removeTrack = (idx, e) => {
@@ -807,22 +823,118 @@ function MusicPlayer() {
   };
 
   // ─── Backup ───────────────────────────────────────────────────────────────
+  // ─── Backup v4 ───────────────────────────────────────────────────────────
+  // Backup only stores what the folder structure can't provide:
+  // playlists, custom covers, EQ, track order. No audio data.
+  //
+  // applyBackupV4 can be called from importBackup (matches against current
+  // tracks) or from handleFolderImport (passes freshly-imported tracks).
+  const applyBackupV4 = async (backup, freshTracks) => {
+    const tl = freshTracks ? [...tracks, ...freshTracks] : tracks;
+    const fnMap = new Map(tl.map(t => [t.originalFilename, t]));
+
+    // Settings
+    const s = backup.settings || {};
+    if (s.eqBass        !== undefined) setEqBass(s.eqBass);
+    if (s.eqMid         !== undefined) setEqMid(s.eqMid);
+    if (s.eqTreble      !== undefined) setEqTreble(s.eqTreble);
+    if (s.repeat        !== undefined) setRepeat(s.repeat);
+    if (s.shuffle       !== undefined) setShuffle(s.shuffle);
+    if (s.headphoneOnly !== undefined) setHeadphoneOnly(s.headphoneOnly);
+    await Promise.all(Object.entries(s).map(([k, v]) => dbPut('settings', { key: k, value: v }))).catch(console.error);
+
+    // Artist / album covers
+    if (backup.artistCovers) {
+      const newAC = { ...artistCovers, ...backup.artistCovers };
+      setArtistCovers(newAC);
+      await Promise.all(Object.entries(backup.artistCovers).map(([k, v]) => dbPut('settings', { key: `ac:${k}`, value: v }))).catch(console.error);
+    }
+    if (backup.albumCovers) {
+      const newALC = { ...albumCovers, ...backup.albumCovers };
+      setAlbumCovers(newALC);
+      await Promise.all(Object.entries(backup.albumCovers).map(([k, v]) => dbPut('settings', { key: `alc:${k}`, value: v }))).catch(console.error);
+    }
+
+    // Custom track covers + track order in one setTracks pass
+    const coverMap = new Map();
+    if (backup.trackCovers) {
+      for (const [fn, art] of Object.entries(backup.trackCovers)) {
+        const t = fnMap.get(fn);
+        if (t) {
+          coverMap.set(t.id, art);
+          dbGet('tracksMetadata', t.id).then(m => m && dbPut('tracksMetadata', { ...m, art })).catch(console.error);
+        }
+      }
+    }
+
+    setTracks(prev => {
+      // Apply track order from backup
+      let result = [...prev];
+      if (Array.isArray(backup.trackOrder) && backup.trackOrder.length) {
+        const ordered = backup.trackOrder.map(fn => fnMap.get(fn)).filter(Boolean);
+        const orderedIds = new Set(ordered.map(t => t.id));
+        result = [...ordered, ...prev.filter(t => !orderedIds.has(t.id))];
+      }
+      // Apply custom covers
+      if (coverMap.size) result = result.map(t => coverMap.has(t.id) ? { ...t, art: coverMap.get(t.id) } : t);
+      return result;
+    });
+
+    // Playlists — merge with existing (don't delete ones not in backup)
+    if (Array.isArray(backup.playlists) && backup.playlists.length) {
+      const restored = backup.playlists.map(pl => ({
+        id: pl.id || `pl-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: pl.name,
+        trackIds: (pl.trackFilenames || pl.trackIds || [])
+          .map(ref => typeof ref === 'string' && !ref.startsWith('t-')
+            ? fnMap.get(ref)?.id          // filename reference (v4)
+            : ref                          // legacy ID reference
+          ).filter(Boolean),
+      }));
+      await Promise.all(restored.map(pl => dbPut('playlists', pl))).catch(console.error);
+      setPlaylists(prev => {
+        const existingIds = new Set(prev.map(p => p.id));
+        return [
+          ...prev.map(p => restored.find(r => r.id === p.id) || p),
+          ...restored.filter(r => !existingIds.has(r.id)),
+        ];
+      });
+    }
+
+    return tl.length;
+  };
+
   const exportBackup = async () => {
-    if (!tracks.length) return;
-    setIsExporting(true); showToast("Erstelle Backup...");
+    if (!tracks.length && !playlists.length) return;
+    setIsExporting(true); showToast("Erstelle Backup…");
     try {
-      const dbMeta = await dbGetAll('tracksMetadata');
-      const order  = tracks.map(t => t.id);
-      const sorted = order.map(id => dbMeta.find(t => t.id === id)).filter(Boolean);
+      // Track covers (custom ones set via "Cover ändern")
+      const trackCovers = {};
+      for (const t of tracks) {
+        if (t.art && t.originalFilename) trackCovers[t.originalFilename] = t.art;
+      }
       const backup = {
-        version: 3, exportDate: new Date().toISOString(),
-        settings: { eqBass, eqMid, eqTreble, repeat, shuffle },
-        tracks: sorted.map(t => ({ id: t.id, name: t.name, artist: t.artist || null, album: t.album || null, originalFilename: t.originalFilename || null, art: t.art || null })),
-        playlists: playlists.map(pl => ({ id: pl.id, name: pl.name, trackIds: pl.trackIds })),
+        version: 4,
+        exportDate: new Date().toISOString(),
+        note: "Backup im Musik-Ordner ablegen — beim Ordner-Import wird es automatisch erkannt.",
+        settings: { eqBass, eqMid, eqTreble, repeat, shuffle, headphoneOnly },
+        trackOrder: tracks.map(t => t.originalFilename).filter(Boolean),
+        playlists: playlists.map(pl => ({
+          id: pl.id, name: pl.name,
+          trackFilenames: pl.trackIds.map(id => tracks.find(t => t.id === id)?.originalFilename).filter(Boolean),
+        })),
+        artistCovers,
+        albumCovers,
+        trackCovers,
       };
-      const jsonStr = JSON.stringify(backup, null, 2), filename = `Music_Backup_${new Date().toISOString().slice(0,10)}.json`;
+      const jsonStr = JSON.stringify(backup, null, 2);
+      const filename = 'Music_Backup.json';
       if (window.showSaveFilePicker) {
-        const handle = await window.showSaveFilePicker({ suggestedName: filename, types: [{ description: 'Music Backup', accept: { 'application/json': ['.json'] } }] });
+        const handle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          startIn: 'music',
+          types: [{ description: 'Music Backup', accept: { 'application/json': ['.json'] } }],
+        });
         const w = await handle.createWritable(); await w.write(jsonStr); await w.close();
       } else {
         const blob = new Blob([jsonStr], { type: 'application/json' }), url = URL.createObjectURL(blob), a = document.createElement('a');
@@ -837,38 +949,46 @@ function MusicPlayer() {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
     e.target.value = "";
-    const jsonFile   = files.find(f => f.name.endsWith('.json') || f.type === 'application/json');
-    const audioFiles = files.filter(f => isAudioFile(f));
+    const jsonFile = files.find(f => f.name.endsWith('.json') || f.type === 'application/json');
     if (!jsonFile) { showToast("Keine Backup-Datei (.json) gefunden."); return; }
-    setIsImporting(true); showToast("Importiere Backup...");
+    setIsImporting(true); showToast("Importiere Backup…");
     try {
       const backup = JSON.parse(await jsonFile.text());
-      if (!Array.isArray(backup.tracks)) { showToast("Ungültiges Backup-Format."); setIsImporting(false); return; }
-      if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
-      tracks.forEach(t => { if (t.url) URL.revokeObjectURL(t.url); });
-      await dbClear('tracks'); await dbClear('tracksMetadata'); await dbClear('playlists'); await dbClear('settings');
-      setPlaying(false); setCurrentIdx(null); setCurrentTime(0); setDuration(0);
-      setRenderTrackIdx(""); setActiveCtxId(null); setBrowseView('home'); setListTab('songs');
-      const s = backup.settings || {};
-      setEqBass(s.eqBass ?? 0); setEqMid(s.eqMid ?? 0); setEqTreble(s.eqTreble ?? 0);
-      setRepeat(s.repeat ?? false); setShuffle(s.shuffle ?? false);
-      const audioMap = new Map(audioFiles.map(f => [f.name, f]));
-      const matched = [], unmatched = [];
-      for (const tm of backup.tracks) {
-        let blob = null;
-        if (backup.version === 1 && tm.audioBase64) { blob = base64ToBlob(tm.audioBase64); }
-        else { const af = tm.originalFilename ? audioMap.get(tm.originalFilename) : null; if (!af) { unmatched.push(tm.originalFilename || tm.name); continue; } blob = af; }
-        matched.push({ id: tm.id, name: tm.name, artist: tm.artist || null, album: tm.album || null, blob, art: tm.art || null, originalFilename: tm.originalFilename || null });
+      if (backup.version >= 4) {
+        // New format — works against current library, no audio files needed
+        if (!tracks.length) { showToast("Lade zuerst deine Musik, dann importiere das Backup."); return; }
+        await applyBackupV4(backup);
+        showToast("Backup wiederhergestellt!");
+      } else {
+        // Legacy v1–v3: needs audio files alongside JSON
+        if (!Array.isArray(backup.tracks)) { showToast("Ungültiges Backup-Format."); return; }
+        const audioFiles = files.filter(f => isAudioFile(f));
+        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+        tracks.forEach(t => { if (t.url) URL.revokeObjectURL(t.url); });
+        await dbClear('tracks'); await dbClear('tracksMetadata'); await dbClear('playlists'); await dbClear('settings');
+        setPlaying(false); setCurrentIdx(null); setCurrentTime(0); setDuration(0);
+        setRenderTrackIdx(""); setActiveCtxId(null); setBrowseView('home'); setListTab('songs');
+        const s = backup.settings || {};
+        setEqBass(s.eqBass ?? 0); setEqMid(s.eqMid ?? 0); setEqTreble(s.eqTreble ?? 0);
+        setRepeat(s.repeat ?? false); setShuffle(s.shuffle ?? false);
+        const audioMap = new Map(audioFiles.map(f => [f.name, f]));
+        const matched = [], unmatched = [];
+        for (const tm of backup.tracks) {
+          let blob = null;
+          if (backup.version === 1 && tm.audioBase64) { blob = base64ToBlob(tm.audioBase64); }
+          else { const af = tm.originalFilename ? audioMap.get(tm.originalFilename) : null; if (!af) { unmatched.push(tm.originalFilename || tm.name); continue; } blob = af; }
+          matched.push({ id: tm.id, name: tm.name, artist: tm.artist || null, album: tm.album || null, blob, art: tm.art || null, originalFilename: tm.originalFilename || null });
+        }
+        await Promise.all([...matched.map(t => dbPut('tracks', { id: t.id, blob: t.blob })), ...matched.map(t => dbPut('tracksMetadata', { id: t.id, name: t.name, artist: t.artist, album: t.album, art: t.art, originalFilename: t.originalFilename }))]);
+        setTracks(matched.map(t => ({ id: t.id, name: t.name, artist: t.artist, album: t.album, url: URL.createObjectURL(t.blob), art: t.art, originalFilename: t.originalFilename })));
+        if (Array.isArray(backup.playlists) && backup.playlists.length) {
+          const matchedIds = new Set(matched.map(t => t.id));
+          const rPls = backup.playlists.map(pl => ({ ...pl, trackIds: pl.trackIds.filter(id => matchedIds.has(id)) }));
+          await Promise.all(rPls.map(pl => dbPut('playlists', pl)));
+          setPlaylists(rPls);
+        } else { setPlaylists([]); }
+        showToast(unmatched.length > 0 ? `${matched.length} Titel geladen. Nicht gefunden: ${unmatched.join(', ')}` : `${matched.length} Titel wiederhergestellt!`);
       }
-      await Promise.all([...matched.map(t => dbPut('tracks', { id: t.id, blob: t.blob })), ...matched.map(t => dbPut('tracksMetadata', { id: t.id, name: t.name, artist: t.artist, album: t.album, art: t.art, originalFilename: t.originalFilename }))]);
-      setTracks(matched.map(t => ({ id: t.id, name: t.name, artist: t.artist, album: t.album, url: URL.createObjectURL(t.blob), art: t.art, originalFilename: t.originalFilename })));
-      if (Array.isArray(backup.playlists) && backup.playlists.length > 0) {
-        const matchedIds = new Set(matched.map(t => t.id));
-        const restoredPls = backup.playlists.map(pl => ({ ...pl, trackIds: pl.trackIds.filter(id => matchedIds.has(id)) }));
-        await Promise.all(restoredPls.map(pl => dbPut('playlists', pl)));
-        setPlaylists(restoredPls);
-      } else { setPlaylists([]); }
-      showToast(unmatched.length > 0 ? `${matched.length} Titel geladen. Nicht gefunden: ${unmatched.join(', ')}` : `${matched.length} Titel wiederhergestellt!`);
     } catch (err) { console.error(err); showToast("Import fehlgeschlagen."); }
     finally { setIsImporting(false); }
   };
@@ -1063,7 +1183,7 @@ function MusicPlayer() {
         <input ref={folderInputRef}   type="file" webkitdirectory="" multiple style={{ display:"none" }} onChange={handleFolderImport} />
         <input ref={artInputRef}      type="file" accept="image/*" style={{ display:"none" }} onChange={handleArtFile} />
         <input ref={extraArtInputRef} type="file" accept="image/*" style={{ display:"none" }} onChange={handleExtraArt} />
-        <input ref={importRef}        type="file" accept=".json,application/json,audio/*,.m4a,.mp3,.wav,.ogg,.flac,.aac,.opus,.mp4" multiple style={{ display:"none" }} onChange={importBackup} />
+        <input ref={importRef}        type="file" accept=".json,application/json" style={{ display:"none" }} onChange={importBackup} />
 
         {toast && (
           <div style={{ position:"absolute", top:16, left:"50%", transform:"translateX(-50%)", background:"#1a1a1a", border:"1px solid #333", color:"#fff", padding:"10px 20px", borderRadius:12, fontSize:13, zIndex:100, textAlign:"center", width:"90%", maxWidth:320 }}>
@@ -1669,17 +1789,17 @@ function MusicPlayer() {
             </div>
 
             <div>
-              <h3 style={{ fontSize:18, fontWeight:800, marginBottom:8 }}>Bibliothek sichern</h3>
-              <p style={{ fontSize:12, color:"#666", marginBottom:4 }}>Das Backup enthält Reihenfolge, Playlists, Covers und EQ — ohne Audiodaten.</p>
-              <p style={{ fontSize:11, color:"#3a3a3a", marginBottom:20, lineHeight:1.6 }}>Import: JSON + Audiodateien gemeinsam auswählen. Playlists werden automatisch wiederhergestellt.</p>
+              <h3 style={{ fontSize:18, fontWeight:800, marginBottom:8 }}>Backup</h3>
+              <p style={{ fontSize:12, color:"#666", marginBottom:4 }}>Speichert Playlists, Cover und EQ — kein Audio. Backup einfach in den Musik-Ordner legen, es wird beim nächsten Ordner-Import automatisch erkannt.</p>
+              <p style={{ fontSize:11, color:"#3a3a3a", marginBottom:20, lineHeight:1.6 }}>Manueller Import: erst Musik laden, dann Backup importieren (nur JSON nötig).</p>
               <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                <button onClick={exportBackup} disabled={isExporting||tracks.length===0}
-                  style={{ width:"100%", background:tracks.length===0?"#1a1a1a":"#0f3d22", color:tracks.length===0?"#444":"#4ade80", border:`1px solid ${tracks.length===0?"#222":"#1a5c32"}`, borderRadius:12, padding:"12px", fontSize:14, fontWeight:700, cursor:tracks.length===0?"not-allowed":"pointer" }}>
-                  {isExporting ? "Erstelle Backup..." : `↓  Backup exportieren  (${tracks.length} Titel, ${playlists.length} Playlists)`}
+                <button onClick={exportBackup} disabled={isExporting||(!tracks.length&&!playlists.length)}
+                  style={{ width:"100%", background:(!tracks.length&&!playlists.length)?"#1a1a1a":"#0f3d22", color:(!tracks.length&&!playlists.length)?"#444":"#4ade80", border:`1px solid ${(!tracks.length&&!playlists.length)?"#222":"#1a5c32"}`, borderRadius:12, padding:"12px", fontSize:14, fontWeight:700, cursor:(!tracks.length&&!playlists.length)?"not-allowed":"pointer" }}>
+                  {isExporting ? "Erstelle Backup…" : `↓  Backup exportieren  (${playlists.length} Playlists, ${Object.keys(artistCovers).length + Object.keys(albumCovers).length} Cover)`}
                 </button>
                 <button onClick={() => !isImporting && importRef.current?.click()} disabled={isImporting}
                   style={{ width:"100%", background:"#0f1f3d", color:isImporting?"#666":"#60a5fa", border:"1px solid #1a2f5c", borderRadius:12, padding:"12px", fontSize:14, fontWeight:700, cursor:isImporting?"not-allowed":"pointer" }}>
-                  {isImporting ? "Importiere..." : "↑  Backup importieren"}
+                  {isImporting ? "Importiere…" : "↑  Backup importieren  (nur JSON)"}
                 </button>
                 {!confirmClear ? (
                   <button onClick={() => setConfirmClear(true)} style={{ width:"100%", background:"none", color:"#444", border:"1px solid #222", borderRadius:12, padding:"12px", fontSize:14, fontWeight:700, cursor:"pointer" }}>
@@ -1693,7 +1813,7 @@ function MusicPlayer() {
                 )}
               </div>
               <div style={{ marginTop:16, padding:"12px 14px", background:"#0d0d0d", borderRadius:10, fontSize:11, color:"#3a3a3a", lineHeight:1.7 }}>
-                ⚡ Alles wird automatisch im Browser gespeichert. Das Backup sichert gegen Cache-Löschung und Gerätewechsel ab.
+                ⚡ Musik bleibt in deiner Ordnerstruktur. Das Backup sichert nur Playlists, Cover und Einstellungen.
               </div>
             </div>
           </div>
